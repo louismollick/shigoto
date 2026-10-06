@@ -1,8 +1,9 @@
 """Public ATS board adapters (ported from Career Ops' providers/{greenhouse,lever,ashby,smartrecruiters}.mjs).
 
-Greenhouse, Lever and Ashby return a company's whole board in one request, so we
-filter titles by `ats_title_keywords`. SmartRecruiters supports server-side keyword +
-country search, so it runs per search term like Workday.
+Greenhouse, Lever and Ashby return a company's whole board in one request.
+SmartRecruiters supports server-side keyword + country search, so it runs per search
+term like Workday. Titles are pre-filtered by `title_keywords` (normalize() checks it
+again for every source) so we skip detail fetches for irrelevant postings.
 """
 
 from __future__ import annotations
@@ -111,9 +112,11 @@ class SmartRecruitersSource:
     API = "https://api.smartrecruiters.com/v1/companies"
     MAX_PAGES = 3
 
-    def __init__(self, boards: list[SlugBoard], terms: list[str], in_target_city: Callable[[str], bool]) -> None:
+    def __init__(self, boards: list[SlugBoard], terms: list[str], title_keywords: list[str],
+                 in_target_city: Callable[[str], bool]) -> None:
         self.boards = boards
         self.terms = terms
+        self.title_keywords = title_keywords
         self.in_target_city = in_target_city
 
     def fetch(self) -> Iterator[Job]:
@@ -127,7 +130,8 @@ class SmartRecruitersSource:
                     continue
                 for p in postings:
                     location = clean((p.get("location") or {}).get("fullLocation"))
-                    if p["id"] in seen or not self.in_target_city(location):
+                    if (p["id"] in seen or not self.in_target_city(location)
+                            or not title_matches(p.get("name", ""), self.title_keywords)):
                         continue
                     seen.add(p["id"])
                     try:

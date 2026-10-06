@@ -63,14 +63,18 @@ descriptions:
   linkedin_delay_seconds: 10
   jobbank_max_per_run: 60
 
-# Whole-board ATS sources (Greenhouse/Lever/Ashby) keep only titles starting a word with one of these.
-ats_title_keywords: [microbiolog, laborator, lab tech, lab analyst, lab assistant, quality, QA, QC, food, molecular, environmental, analyst,
-                     technician, technologist, scientist, research associate, chemist, biolog]
+# Every job's title must contain one of these (case/accent-insensitive, whole word; trailing * = prefix).
+# This is the main relevance filter: Indeed and Workday also match descriptions, so "food safety"
+# otherwise pulls in every line cook with a food-handler certificate. French for Quebec employers.
+title_keywords: [microbiolog*, laborator*, lab, quality, QA, QC, FSQA, HACCP, food safety, food scien*,
+                 food technolog*, food quality, food testing, molecular, environment*, analytical,
+                 scientist*, research*, chemist*, biochem*, biolog*, biotech*, sample, samples, HPLC, assay*,
+                 stability, sanitation, regulatory, validation, product develop*, R&D,
+                 laboratoire*, qualite, chimiste*, salubrite, scientifique*, recherche, assurance, controle]
 
-# Dropped everywhere (Indeed also matches descriptions, so "quality assurance" pulls in software QA).
-# Matching is case-insensitive word-prefix, so keep these specific ("developer" would drop food Product Developers).
+# Then dropped if the title contains any of these (same matching rules).
 exclude_title_keywords: [software, SDET, QA automation, test automation, automation tester, web developer,
-                         full stack, frontend, backend, devops]
+                         full stack, frontend, backend, devops, dental, IT]
 
 # Verified 2026-10-06 (see README). Workday/SmartRecruiters search per term server-side.
 boards:

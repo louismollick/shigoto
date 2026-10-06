@@ -32,19 +32,25 @@ def test_city_matching() -> None:
     assert matcher.match("Ville de Montréal") == "Montreal"
 
 
-def test_title_keywords_are_word_prefixes() -> None:
-    assert title_matches("Microbiologist II", ["microbiolog"])
-    assert title_matches("Sr. QA Specialist", ["QA"])
+def test_title_keywords_whole_word_or_prefix() -> None:
+    assert title_matches("Microbiologist II", ["microbiolog*"])
+    assert title_matches("Sr. QA/QC Specialist", ["QA"])
+    assert title_matches("Contrôle qualité", ["qualite"])
+    assert title_matches("Lab Operations Support", ["lab"])
     assert not title_matches("AQUA engineer", ["QA"])
-    assert not title_matches("Labourer", ["lab tech"])
+    assert not title_matches("Labourer", ["lab"])
+    assert title_matches("Line Cook", ["cook"])
+    assert not title_matches("QA Technician - Cookies", ["cook"])
 
 
 def test_normalize_sets_city_and_drops() -> None:
-    j = normalize(job(source="workday", location="Burnaby, BC"), matcher, [])
+    kw = ["QA", "food safety"]
+    j = normalize(job(source="workday", location="Burnaby, BC"), matcher, kw, [])
     assert j is not None and j.city == "Vancouver"
-    assert normalize(job(location="Calgary, AB"), matcher, []) is None
-    assert normalize(job(title="Software QA Engineer"), matcher, ["software"]) is None
-    preset = normalize(job(location="Guelph, ON", city="Toronto"), matcher, [])
+    assert normalize(job(location="Calgary, AB"), matcher, kw, []) is None
+    assert normalize(job(title="Software QA Engineer"), matcher, kw, ["software"]) is None
+    assert normalize(job(title="Line Cook"), matcher, kw, []) is None
+    preset = normalize(job(location="Guelph, ON", city="Toronto"), matcher, kw, [])
     assert preset is not None and preset.city == "Toronto"
 
 

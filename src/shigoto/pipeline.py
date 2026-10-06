@@ -18,11 +18,12 @@ log = logging.getLogger(__name__)
 def run_once(config: Config, *, sync_sheet: bool = True, only: set[str] | None = None) -> dict[str, int]:
     """Run every source (or just `only`), then push the delta to the sheet."""
     store = Store(config.db_path)
+    backfill = store.last_finished_run() is None
     run_id = store.start_run(now_iso())
     stats: Counter[str] = Counter()
     try:
         matcher = CityMatcher(config.cities)
-        for source in build_sources(config, matcher):
+        for source in build_sources(config, matcher, backfill):
             if only is None or source.name in only:
                 stats.update(ingest(store, source, matcher, config))
         stats.update(enrich_descriptions(store, config))
@@ -43,7 +44,7 @@ def ingest(store: Store, source: Source, matcher: CityMatcher, config: Config) -
     try:
         for raw in source.fetch():
             stats[f"fetched_{source.name}"] += 1
-            job = normalize(raw, matcher, config.exclude_title_keywords)
+            job = normalize(raw, matcher, config.title_keywords, config.exclude_title_keywords)
             if job is None:
                 stats["dropped"] += 1
                 continue

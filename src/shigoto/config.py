@@ -34,6 +34,7 @@ class JobSpySite(BaseModel):
     combine_terms: bool = False
     results_wanted: int = 50
     hours_old: int = 24
+    backfill_hours_old: int = 336  # used instead of hours_old on the very first run
     delay_seconds: float = 2.0
     enabled: bool = True
 
@@ -58,7 +59,7 @@ class SlugBoard(BaseModel):
 
 class Boards(BaseModel):
     """Employer ATS boards. Workday + SmartRecruiters are searched per term server-side;
-    Greenhouse/Lever/Ashby return the whole board and are filtered by `ats_title_keywords`."""
+    Greenhouse/Lever/Ashby return the whole board."""
 
     workday: list[WorkdayBoard] = Field(default_factory=list)
     greenhouse: list[SlugBoard] = Field(default_factory=list)
@@ -79,7 +80,7 @@ class Config(BaseModel):
     jobspy: list[JobSpySite] = Field(default_factory=list)
     jobbank_enabled: bool = True
     boards: Boards = Field(default_factory=Boards)
-    ats_title_keywords: list[str] = Field(default_factory=list)
+    title_keywords: list[str]  # a job's title must contain one (word-prefix match)
     exclude_title_keywords: list[str] = Field(default_factory=list)
     descriptions: DescriptionFetch = Field(default_factory=DescriptionFetch)
     sheet: SheetConfig

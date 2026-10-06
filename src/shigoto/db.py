@@ -1,7 +1,8 @@
 """SQLite store: the authoritative job history.
 
 `jobs` holds one row per deduplicated job; `job_sources` maps every (source, source_id)
-we've seen to its job. A job's fields come from its primary (first) source; other
+we've seen to its job. Postings only merge across sources: two ids from the same source
+are always two jobs, even with identical company/title/city. A job's fields come from its primary (first) source; other
 sources only fill blanks, so the content hash doesn't flip-flop between sources.
 `content_hash` changes only on material edits, and `synced_hash` records what the
 Google Sheet last received, so `unsynced()` is exactly the delta to push.
@@ -90,8 +91,11 @@ class DescriptionTarget:
     url: str
 
 
-def make_job_id(job: Job) -> str:
-    return hashlib.sha1(dedupe_key(job).encode()).hexdigest()[:16]
+def make_job_id(job: Job, distinct: bool = False) -> str:
+    """Cross-source identity from the dedupe key. `distinct` adds the source id, for a
+    second posting from the same source that happens to share company/title/city."""
+    key = dedupe_key(job) + (f"|{job.source}|{job.source_id}" if distinct else "")
+    return hashlib.sha1(key.encode()).hexdigest()[:16]
 
 
 def content_hash(title: str, company: str, location: str, salary: str, description: str) -> str:
@@ -119,6 +123,9 @@ class Store:
         mapped = c.execute("SELECT job_id FROM job_sources WHERE source=? AND source_id=?",
                            (job.source, job.source_id)).fetchone()
         job_id: str = mapped["job_id"] if mapped else make_job_id(job)
+        if not mapped and c.execute("SELECT 1 FROM job_sources WHERE job_id=? AND source=?",
+                                    (job_id, job.source)).fetchone():
+            job_id = make_job_id(job, distinct=True)  # same source, different id: a separate posting
         c.execute(
             """INSERT INTO job_sources (source, source_id, job_id, url, first_seen, last_seen)
                VALUES (?, ?, ?, ?, ?, ?)

@@ -6,8 +6,8 @@ Uses the public CXS API behind `https://<tenant>.<wdN>.myworkdayjobs.com/<site>`
 
 Per tenant we first read the facets once to find a location filter: the "Canada"
 country value if the tenant has one, otherwise the location values naming one of our
-cities. Then each search term runs server-side under that filter, so we only fetch
-details for a small set of relevant postings.
+cities. Then each search term runs server-side under that filter, and titles are
+checked against `title_keywords` before fetching details.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 from shigoto.config import WorkdayBoard
 from shigoto.http import PoliteSession
 from shigoto.models import Job
+from shigoto.normalize import title_matches
 from shigoto.text import clean, html_to_text, parse_date
 
 log = logging.getLogger(__name__)
@@ -75,9 +76,11 @@ def location_filter(facets: list[dict[str, Any]], is_target: Callable[[str], boo
 class WorkdaySource:
     name = "workday"
 
-    def __init__(self, boards: list[WorkdayBoard], terms: list[str], is_target: Callable[[str], bool]) -> None:
+    def __init__(self, boards: list[WorkdayBoard], terms: list[str], title_keywords: list[str],
+                 is_target: Callable[[str], bool]) -> None:
         self.boards = boards
         self.terms = terms
+        self.title_keywords = title_keywords
         self.is_target = is_target
 
     def fetch(self) -> Iterator[Job]:
@@ -102,7 +105,8 @@ class WorkdaySource:
                 })
                 postings = data.get("jobPostings") or []
                 for p in postings:
-                    if p.get("externalPath"):
+                    # searchText also matches descriptions, so re-check the title
+                    if p.get("externalPath") and title_matches(p.get("title", ""), self.title_keywords):
                         paths.setdefault(p["externalPath"], p)
                 if len(postings) < PAGE_SIZE or (page + 1) * PAGE_SIZE >= data.get("total", 0):
                     break

@@ -31,6 +31,16 @@ def test_cross_source_dedupe_and_change_detection(tmp_path: Path) -> None:
     assert changed.updated_at == "t3" and changed.first_seen == "t1"
 
 
+def test_same_source_postings_stay_separate(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    assert store.upsert(job(source="workday", source_id="a", description="Plant A"), "t1") == "new"
+    assert store.upsert(job(source="workday", source_id="b", description="Plant B"), "t1") == "new"
+    assert store.upsert(job(source="workday", source_id="a", description="Plant A"), "t2") == "seen"
+    assert store.upsert(job(source="workday", source_id="b", description="Plant B"), "t2") == "seen"
+    store.commit()
+    assert len(store.unsynced()) == 2
+
+
 def test_description_enrichment_targets(tmp_path: Path) -> None:
     store = Store(tmp_path / "t.db")
     store.upsert(job(source="linkedin", source_id="li-5", description=""), "t1")

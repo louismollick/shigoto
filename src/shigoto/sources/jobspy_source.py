@@ -44,8 +44,9 @@ def build_queries(terms: list[str], combine: bool) -> list[str]:
 
 
 class JobSpySource:
-    def __init__(self, site: JobSpySite, terms: list[str], cities: list[City]) -> None:
+    def __init__(self, site: JobSpySite, terms: list[str], cities: list[City], backfill: bool = False) -> None:
         self.site = site
+        self.hours_old = site.backfill_hours_old if backfill else site.hours_old
         self.name: str = site.site
         self.terms = terms
         self.cities = cities
@@ -72,7 +73,7 @@ class JobSpySource:
                 search_term=query,
                 location=city.jobspy_location,
                 results_wanted=self.site.results_wanted,
-                hours_old=self.site.hours_old,
+                hours_old=self.hours_old,
                 country_indeed="Canada",
                 description_format="markdown",
                 verbose=1,

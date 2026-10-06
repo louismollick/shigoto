@@ -45,12 +45,19 @@ class CityMatcher:
 
 
 def title_matches(title: str, keywords: list[str]) -> bool:
+    """Case/accent-insensitive whole-word match ("lab" doesn't match "Labourer"); a
+    trailing `*` makes it a prefix ("microbiolog*" matches "Microbiologist")."""
     folded = fold(title)
-    return any(re.search(r"\b" + re.escape(fold(k)), folded) for k in keywords)
+    return any(
+        re.search(r"\b" + re.escape(fold(k.removesuffix("*"))) + ("" if k.endswith("*") else r"\b"), folded)
+        for k in keywords
+    )
 
 
-def normalize(job: Job, matcher: CityMatcher, exclude_title_keywords: list[str]) -> Job | None:
-    """Clean a job in place-ish and return it, or None if it's outside our cities or excluded."""
+def normalize(job: Job, matcher: CityMatcher, title_keywords: list[str],
+              exclude_title_keywords: list[str]) -> Job | None:
+    """Clean a job in place and return it, or None if it's outside our cities or its title
+    doesn't look relevant (no `title_keywords` prefix, or an excluded whole word)."""
     job.title = clean(job.title)
     job.company = clean(job.company)
     job.location = clean(job.location)
@@ -61,7 +68,9 @@ def normalize(job: Job, matcher: CityMatcher, exclude_title_keywords: list[str])
         job.city = matcher.match(job.location) or ""
     if not job.city or not job.title:
         return None
-    if exclude_title_keywords and title_matches(job.title, exclude_title_keywords):
+    if not title_matches(job.title, title_keywords):
+        return None
+    if title_matches(job.title, exclude_title_keywords):
         return None
     return job
 
