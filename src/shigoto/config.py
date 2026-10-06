@@ -52,15 +52,21 @@ class WorkdayBoard(BaseModel):
     url: str
 
 
+class SuccessFactorsBoard(BaseModel):
+    name: str
+    url: str
+
+
 class SlugBoard(BaseModel):
     name: str
     slug: str
 
 
 class Boards(BaseModel):
-    """Employer ATS boards. Workday + SmartRecruiters are searched per term server-side;
+    """Employer ATS boards. Workday/SmartRecruiters/SuccessFactors search per term;
     Greenhouse/Lever/Ashby return the whole board."""
 
+    successfactors: list[SuccessFactorsBoard] = Field(default_factory=list)
     workday: list[WorkdayBoard] = Field(default_factory=list)
     greenhouse: list[SlugBoard] = Field(default_factory=list)
     lever: list[SlugBoard] = Field(default_factory=list)
@@ -79,11 +85,13 @@ class Config(BaseModel):
     cities: list[City]
     jobspy: list[JobSpySite] = Field(default_factory=list)
     jobbank_enabled: bool = True
+    gcjobs_enabled: bool = True
     boards: Boards = Field(default_factory=Boards)
     title_keywords: list[str]  # a job's title must contain one (word-prefix match)
     exclude_title_keywords: list[str] = Field(default_factory=list)
     descriptions: DescriptionFetch = Field(default_factory=DescriptionFetch)
     sheet: SheetConfig
+    liveness_max_per_run: int = Field(default=40, ge=0)
     interval_hours: float = 6.0
 
     # Filled from env, not yaml.

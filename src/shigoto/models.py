@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from typing import Literal
 
 
 @dataclass
@@ -27,3 +28,6 @@ class Job:
     salary: str = ""
     job_type: str = ""
     city: str = ""
+
+
+Liveness = Literal["gone", "alive", "unknown"]

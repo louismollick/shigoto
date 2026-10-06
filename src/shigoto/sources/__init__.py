@@ -9,8 +9,10 @@ from shigoto.config import Config
 from shigoto.models import Job
 from shigoto.normalize import CityMatcher
 from shigoto.sources.ats import BoardSource, SmartRecruitersSource, ashby_board, greenhouse_board, lever_board
+from shigoto.sources.gcjobs import GCJobsSource
 from shigoto.sources.jobbank import JobBankSource
 from shigoto.sources.jobspy_source import JobSpySource
+from shigoto.sources.successfactors import SuccessFactorsSource
 from shigoto.sources.workday import WorkdaySource
 
 
@@ -29,7 +31,10 @@ def build_sources(config: Config, matcher: CityMatcher, backfill: bool = False) 
     sources: list[Source] = [JobSpySource(s, terms, config.cities, backfill) for s in config.jobspy if s.enabled]
     if config.jobbank_enabled:
         sources.append(JobBankSource(terms))
+    if config.gcjobs_enabled:
+        sources.append(GCJobsSource(keywords, is_target))
     sources += [
+        SuccessFactorsSource(boards.successfactors, terms, keywords, is_target),
         WorkdaySource(boards.workday, terms, keywords, is_target),
         SmartRecruitersSource(boards.smartrecruiters, terms, keywords, is_target),
         BoardSource("greenhouse", boards.greenhouse, keywords, greenhouse_board),

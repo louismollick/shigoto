@@ -8,6 +8,7 @@ from collections import Counter
 from shigoto.config import Config
 from shigoto.db import Store, now_iso
 from shigoto.enrich import enrich_descriptions
+from shigoto.liveness import check_liveness, reset_robots
 from shigoto.normalize import CityMatcher, normalize
 from shigoto.sheets import open_worksheet, sync
 from shigoto.sources import Source, build_sources
@@ -22,11 +23,13 @@ def run_once(config: Config, *, sync_sheet: bool = True, only: set[str] | None =
     run_id = store.start_run(now_iso())
     stats: Counter[str] = Counter()
     try:
+        reset_robots()
         matcher = CityMatcher(config.cities)
         for source in build_sources(config, matcher, backfill):
             if only is None or source.name in only:
                 stats.update(ingest(store, source, matcher, config))
         stats.update(enrich_descriptions(store, config))
+        stats.update(check_liveness(store, config))
         if sync_sheet:
             if config.google_credentials is None or not config.sheet.spreadsheet_id:
                 raise RuntimeError("GOOGLE_APPLICATION_CREDENTIALS and SHIGOTO_SPREADSHEET_ID must be set")

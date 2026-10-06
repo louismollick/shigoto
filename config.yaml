@@ -1,6 +1,7 @@
 # shigoto config. Secrets/paths come from env: GOOGLE_APPLICATION_CREDENTIALS, SHIGOTO_SPREADSHEET_ID, SHIGOTO_DB.
 
 interval_hours: 6
+liveness_max_per_run: 40
 
 search_terms:
   - microbiology
@@ -59,6 +60,7 @@ jobspy:
     delay_seconds: 30
 
 jobbank_enabled: true
+gcjobs_enabled: true
 
 descriptions:
   linkedin_max_per_run: 25
@@ -78,9 +80,16 @@ title_keywords: [microbiolog*, laborator*, lab, quality, QA, QC, FSQA, HACCP, fo
 exclude_title_keywords: [software, SDET, tester, game, games, QA automation, test automation, web developer,
                          full stack, frontend, backend, devops, dental, IT, bilingual, bilingue, French]
 
-# Verified 2026-10-06 (see README). Workday/SmartRecruiters search per term server-side.
+# Verified 2026-10-06 (see README). Workday/SmartRecruiters/SuccessFactors search per term server-side.
 boards:
+  successfactors:
+    - {name: Bureau Veritas, url: "https://careers.bureauveritas.com"}
+    - {name: Cargill, url: "https://jobs.cargill.com"}
+    - {name: Nestlé Canada, url: "https://jobdetails.nestle.com"}
+    - {name: Bunge, url: "https://jobs.bunge.com"}
   workday:
+    - {name: Ingredion, url: "https://ingredion.wd1.myworkdayjobs.com/IngredionCareers"}
+    - {name: Unilever, url: "https://unilever.wd3.myworkdayjobs.com/Unilever_Experienced_Professionals"}
     - {name: Thermo Fisher Scientific, url: "https://thermofisher.wd5.myworkdayjobs.com/ThermoFisherCareers"}
     - {name: ALS Global, url: "https://alsglobal.wd103.myworkdayjobs.com/External"}
     - {name: Core Laboratories, url: "https://corelab.wd12.myworkdayjobs.com/CLB"}

@@ -12,9 +12,11 @@ import logging
 from collections.abc import Callable, Iterator
 from typing import Any
 
+import requests
+
 from shigoto.config import SlugBoard
-from shigoto.http import PoliteSession
-from shigoto.models import Job
+from shigoto.http import PoliteSession, RateLimited, RobotsDisallowed, posting_liveness
+from shigoto.models import Job, Liveness
 from shigoto.normalize import title_matches
 from shigoto.text import clean, html_to_text, parse_date
 
@@ -168,3 +170,54 @@ class SmartRecruitersSource:
             posted_date=parse_date(posting.get("releasedDate")),
             job_type=clean((posting.get("typeOfEmployment") or {}).get("label")),
         )
+
+
+def greenhouse_liveness(url: str, source_id: str) -> Liveness:
+    slug, sep, posting_id = source_id.partition(":")
+    if not sep or not posting_id.isdigit():
+        return "unknown"
+    api = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs/{posting_id}"
+    return posting_liveness(_session, api, lambda r: posting_alive(r.json(), posting_id, "title"))
+
+
+def lever_liveness(url: str, source_id: str) -> Liveness:
+    slug, sep, posting_id = source_id.partition(":")
+    if not sep or not posting_id:
+        return "unknown"
+    api = f"https://api.lever.co/v0/postings/{slug}/{posting_id}?mode=json"
+    return posting_liveness(_session, api, lambda r: posting_alive(r.json(), posting_id, "text"))
+
+
+def smartrecruiters_liveness(url: str, source_id: str) -> Liveness:
+    slug, sep, posting_id = source_id.partition(":")
+    if not sep or not posting_id:
+        return "unknown"
+    api = f"{SmartRecruitersSource.API}/{slug}/postings/{posting_id}"
+    return posting_liveness(_session, api, lambda r: posting_alive(r.json(), posting_id, "name"))
+
+
+def posting_alive(data: object, posting_id: str, title_field: str) -> bool:
+    return isinstance(data, dict) and str(data.get("id", "")) == posting_id and bool(data.get(title_field))
+
+
+def ashby_liveness(url: str, source_id: str) -> Liveness:
+    slug, sep, posting_id = source_id.partition(":")
+    if not sep or not posting_id:
+        return "unknown"
+    # A board failure, including 404, cannot prove a particular posting is gone.
+    try:
+        response = _session.request("GET", f"https://api.ashbyhq.com/posting-api/job-board/{slug}", respect_robots=True)
+        return classify_ashby(response.json(), posting_id) if response.status_code == 200 else "unknown"
+    except (requests.RequestException, RateLimited, RobotsDisallowed, ValueError):
+        return "unknown"
+
+
+def classify_ashby(data: object, posting_id: str) -> Liveness:
+    """Absence is evidence only from a complete, recognizable board response."""
+    if not isinstance(data, dict) or not isinstance(data.get("jobs"), list):
+        return "unknown"
+    jobs = data["jobs"]
+    if any(not isinstance(job, dict) or not isinstance(job.get("id"), str) or not job["id"]
+           or not isinstance(job.get("title"), str) for job in jobs):
+        return "unknown"
+    return "alive" if any(job["id"] == posting_id for job in jobs) else "gone"

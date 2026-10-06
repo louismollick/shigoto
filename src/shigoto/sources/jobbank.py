@@ -28,7 +28,7 @@ MAX_PAGES = 5
 CRAWL_DELAY = 5.0
 ATOM = "{http://www.w3.org/2005/Atom}"
 
-_session = PoliteSession(min_interval=CRAWL_DELAY)
+_session = PoliteSession(min_interval=CRAWL_DELAY, respect_robots=True)
 
 
 class JobBankSource:

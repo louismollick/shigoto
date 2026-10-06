@@ -19,8 +19,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 from shigoto.config import WorkdayBoard
-from shigoto.http import PoliteSession
-from shigoto.models import Job
+from shigoto.http import PoliteSession, posting_liveness
+from shigoto.models import Job, Liveness
 from shigoto.normalize import title_matches
 from shigoto.text import clean, html_to_text, parse_date
 
@@ -137,3 +137,22 @@ class WorkdaySource:
             posted_date=parse_date(info.get("startDate")),
             job_type=clean(info.get("timeType")),
         )
+
+
+def check_liveness(url: str, source_id: str) -> Liveness:
+    """Convert the public posting path, with or without a locale, to its CXS detail URL."""
+    parsed = urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if "job" not in parts or not parsed.hostname or not parsed.hostname.endswith(".myworkdayjobs.com"):
+        return "unknown"
+    index = parts.index("job")
+    if index < 1 or index == len(parts) - 1:
+        return "unknown"
+    ep = endpoint(f"https://{parsed.hostname}/{parts[index - 1]}")
+    detail_url = f"{ep.detail_base}/{'/'.join(parts[index:])}"
+    return posting_liveness(_session, detail_url, lambda r: workday_alive(r.json()))
+
+
+def workday_alive(data: object) -> bool:
+    return (isinstance(data, dict) and isinstance(data.get("jobPostingInfo"), dict)
+            and bool(data["jobPostingInfo"].get("title")) and bool(data["jobPostingInfo"].get("jobReqId")))

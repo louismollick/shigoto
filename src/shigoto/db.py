@@ -4,8 +4,8 @@
 we've seen to its job. Postings only merge across sources: two ids from the same source
 are always two jobs, even with identical company/title/city. A job's fields come from its primary (first) source; other
 sources only fill blanks, so the content hash doesn't flip-flop between sources.
-`content_hash` changes only on material edits, and `synced_hash` records what the
-Google Sheet last received, so `unsynced()` is exactly the delta to push.
+`content_hash` changes only on material edits, and `synced_hash` records the content
+hash plus status the Google Sheet last received, so `unsynced()` is the delta to push.
 """
 
 from __future__ import annotations
@@ -14,11 +14,11 @@ import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from shigoto.models import Job
+from shigoto.models import Job, Liveness
 from shigoto.normalize import dedupe_key, fold
 
 SCHEMA = """
@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     description_checked_at TEXT,
     ai_reviewed_at TEXT,
     synced_hash TEXT,
-    synced_at TEXT
+    synced_at TEXT,
+    closed_at TEXT,
+    liveness_checked_at TEXT
 );
 CREATE TABLE IF NOT EXISTS job_sources (
     source TEXT NOT NULL,
@@ -62,6 +64,10 @@ CREATE TABLE IF NOT EXISTS runs (
 """
 
 UpsertResult = Literal["new", "changed", "seen"]
+FULL_LISTING_SOURCES = frozenset({
+    "workday", "smartrecruiters", "greenhouse", "lever", "ashby", "successfactors", "gcjobs",
+})
+CLOSED_AFTER = timedelta(days=2)
 
 
 @dataclass(frozen=True)
@@ -82,6 +88,12 @@ class StoredJob:
     first_seen: str
     updated_at: str
     content_hash: str
+    status: Literal["", "Closed"]
+
+    @property
+    def sync_hash(self) -> str:
+        """Blank status keeps the fingerprint used before status tracking."""
+        return self.content_hash + self.status
 
 
 @dataclass(frozen=True)
@@ -89,6 +101,19 @@ class DescriptionTarget:
     job_id: str
     source_id: str
     url: str
+
+
+@dataclass(frozen=True)
+class SourceLink:
+    source: str
+    source_id: str
+    url: str
+
+
+@dataclass(frozen=True)
+class LivenessTarget:
+    job_id: str
+    sources: list[SourceLink]
 
 
 def make_job_id(job: Job, distinct: bool = False) -> str:
@@ -113,6 +138,11 @@ class Store:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(jobs)")}
+        for column in ("closed_at", "liveness_checked_at"):
+            if column not in columns:
+                self.conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
+        self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
@@ -161,7 +191,7 @@ class Store:
         c.execute(
             """UPDATE jobs SET title=:title, company=:company, location=:location, description=:description,
                salary=:salary, job_type=:job_type, posted_date=coalesce(posted_date, :posted),
-               content_hash=:hash,
+               content_hash=:hash, closed_at=NULL,
                last_seen=:now, updated_at=CASE WHEN :changed THEN :now ELSE updated_at END
                WHERE job_id=:job_id""",
             {**merged, "posted": posted, "hash": h, "now": now, "changed": changed, "job_id": job_id},
@@ -191,11 +221,42 @@ class Store:
         )
         self.conn.commit()
 
+    def liveness_candidates(self, now: str, limit: int) -> list[LivenessTarget]:
+        """Stale board-only jobs, oldest first, checked at most once per day."""
+        cutoff = (datetime.fromisoformat(now) - CLOSED_AFTER).isoformat()
+        checked_cutoff = (datetime.fromisoformat(now) - timedelta(days=1)).isoformat()
+        placeholders = ",".join("?" for _ in FULL_LISTING_SOURCES)
+        rows = self.conn.execute(
+            f"""SELECT j.job_id FROM jobs j JOIN job_sources s ON s.job_id=j.job_id
+                WHERE j.closed_at IS NULL AND (j.liveness_checked_at IS NULL
+                    OR julianday(j.liveness_checked_at) <= julianday(?))
+                GROUP BY j.job_id
+                HAVING min(s.source IN ({placeholders}))=1
+                    AND max(julianday(s.last_seen)) < julianday(?)
+                ORDER BY max(julianday(s.last_seen)), j.job_id LIMIT ?""",
+            (checked_cutoff, *sorted(FULL_LISTING_SOURCES), cutoff, max(0, limit)),
+        ).fetchall()
+        return [LivenessTarget(row["job_id"], [
+            SourceLink(s["source"], s["source_id"], s["url"])
+            for s in self.conn.execute("SELECT source, source_id, url FROM job_sources WHERE job_id=?",
+                                       (row["job_id"],))
+        ]) for row in rows]
+
+    def record_liveness(self, job_id: str, result: Liveness, now: str) -> None:
+        """Status changes leave material content and its update timestamp untouched."""
+        self.conn.execute(
+            """UPDATE jobs SET liveness_checked_at=?,
+               closed_at=CASE WHEN ?='gone' THEN ? ELSE closed_at END WHERE job_id=?""",
+            (now, result, now, job_id),
+        )
+        self.conn.commit()
+
     def unsynced(self) -> list[StoredJob]:
+        """Content changes or confirmed status changes since the previous sheet sync."""
         rows = self.conn.execute(
             """SELECT j.*, (SELECT group_concat(source || ' ' || url, char(10)) FROM job_sources s
                             WHERE s.job_id = j.job_id) AS sources
-               FROM jobs j WHERE synced_hash IS NULL OR synced_hash != content_hash
+               FROM jobs j
                ORDER BY first_seen, job_id"""
         ).fetchall()
         return [
@@ -204,13 +265,15 @@ class Store:
                 location=r["location"], description=r["description"], posted_date=r["posted_date"] or "",
                 salary=r["salary"], job_type=r["job_type"], url=r["url"], sources=r["sources"] or "",
                 first_seen=r["first_seen"], updated_at=r["updated_at"], content_hash=r["content_hash"],
+                status="Closed" if r["closed_at"] is not None else "",
             )
             for r in rows
+            if r["synced_hash"] != r["content_hash"] + ("Closed" if r["closed_at"] is not None else "")
         ]
 
     def mark_synced(self, jobs: list[StoredJob], now: str) -> None:
         self.conn.executemany("UPDATE jobs SET synced_hash=?, synced_at=? WHERE job_id=?",
-                              [(j.content_hash, now, j.job_id) for j in jobs])
+                              [(j.sync_hash, now, j.job_id) for j in jobs])
         self.conn.commit()
 
     def set_ai_reviewed(self, reviewed: dict[str, str]) -> None:
