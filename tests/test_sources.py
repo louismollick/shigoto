@@ -1,5 +1,9 @@
+import math
+
+import pytest
+
 from shigoto.sources.jobbank import parse_feed
-from shigoto.sources.jobspy_source import build_queries
+from shigoto.sources.jobspy_source import build_queries, description_salary, format_salary, row_to_job
 from shigoto.sources.workday import endpoint, location_filter
 
 FEED = """<?xml version="1.0" encoding="UTF-8"?>
@@ -22,6 +26,67 @@ def test_jobbank_feed() -> None:
 def test_linkedin_combined_query() -> None:
     assert build_queries(["microbiology", "food safety"], True) == ['microbiology OR "food safety"']
     assert build_queries(["a", "b"], False) == ["a", "b"]
+
+
+@pytest.mark.parametrize(("description", "expected"), [
+    ("Pay Rate: $23.25/hr", "23.25 CAD hourly"),
+    ("**Pay Rate:** $23.25/hour", "23.25 CAD hourly"),
+    ("Compensation: $23.25 - $25.50 per hour", "23.25 - 25.5 CAD hourly"),
+    ("Earn $23.25 to $25.50 an hour", "23.25 - 25.5 CAD hourly"),
+    ("Salary: $65,000–$75,000 a year", "65,000 - 75,000 CAD yearly"),
+    ("Salary: CAD $65k - CAD $75k annually", "65,000 - 75,000 CAD yearly"),
+    ("Pay Range $23.25—$23.25 CAD", "23.25 CAD"),
+    ("Salary: $65,000 to $75,000.", "65,000 - 75,000 CAD"),
+    ("Pay Rate: $23.25.", "23.25 CAD"),
+    ("Wage: C$25 hourly", "25 CAD hourly"),
+    ("US$25.75/hr", "25.75 USD hourly"),
+    ("$25.75 USD per hour", "25.75 USD hourly"),
+    ("$25.75 per hour USD", "25.75 USD hourly"),
+    ("$4,000 per month", "4,000 CAD monthly"),
+    ("$1,000 weekly", "1,000 CAD weekly"),
+    ("$200/day", "200 CAD daily"),
+    ("$500 signing bonus. Pay Rate: $23.25/hr", "23.25 CAD hourly"),
+    ("$500 wellness allowance and 75% off meal kits", ""),
+    ("Competitive salary and health benefits", ""),
+    ("Salary: $0/hr", ""),
+    ("Salary: $30 - $20/hour", ""),
+    ("", ""),
+])
+def test_description_salary(description: str, expected: str) -> None:
+    assert description_salary(description) == expected
+
+
+@pytest.mark.parametrize(("lo", "hi", "expected"), [
+    (23.25, 23.25, "23.25 CAD hourly"),
+    (23.25, 25.5, "23.25 - 25.5 CAD hourly"),
+    (23.0, None, "23 CAD hourly"),
+    (None, 23.25, "23.25 CAD hourly"),
+    (math.nan, math.nan, "23.25 CAD hourly"),
+    (None, None, "23.25 CAD hourly"),
+])
+def test_jobspy_salary(lo: float | None, hi: float | None, expected: str) -> None:
+    assert format_salary({
+        "min_amount": lo, "max_amount": hi, "currency": "CAD", "interval": "hourly",
+        "description": "Pay Rate: $23.25/hr",
+    }) == expected
+
+
+def test_jobspy_structured_salary_takes_priority() -> None:
+    assert format_salary({
+        "min_amount": 65000, "max_amount": 75000, "currency": "CAD", "interval": "yearly",
+        "description": "Pay Rate: $23.25/hr",
+    }) == "65,000 - 75,000 CAD yearly"
+
+
+def test_jobspy_description_pay_reaches_job() -> None:
+    job = row_to_job({
+        "site": "indeed", "id": "in-7e2199762aa53f88", "title": "FSQA Technician",
+        "job_url": "https://ca.indeed.com/viewjob?jk=7e2199762aa53f88", "company": "HelloFresh",
+        "description": "Location: Calgary\nPay Rate: $23.25/hr\nAbout the Role",
+        "min_amount": math.nan, "max_amount": math.nan, "currency": math.nan,
+    }, "Calgary")
+    assert job is not None
+    assert job.salary == "23.25 CAD hourly"
 
 
 def test_workday_endpoint_and_facets() -> None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -113,14 +114,68 @@ def clean_text(value: object) -> str:
     return "" if value is None or (isinstance(value, float) and math.isnan(value)) else str(value)
 
 
-def format_salary(row: dict[str, Any]) -> str:
-    lo, hi = row.get("min_amount"), row.get("max_amount")
-    nums = [f"{v:,.0f}" for v in (lo, hi) if isinstance(v, (int, float)) and not math.isnan(v)]
-    if not nums:
-        return ""
-    currency = clean(row.get("currency")) or "CAD"
-    interval = clean(row.get("interval"))
+_AMOUNT = r"\d+(?:,\d{3})*(?:\.\d{1,2})?[kK]?"
+_CURRENCY = r"CAD\s*\$?|USD\s*\$?|CA\$|C\$|US\$|\$"
+_DESCRIPTION_PAY = re.compile(
+    rf"(?P<currency>{_CURRENCY})\s*(?P<lo>{_AMOUNT})(?!\d|[.,]\d)"
+    rf"(?:\s*(?:[-–—]|to)\s*(?:{_CURRENCY})?\s*(?P<hi>{_AMOUNT})(?!\d|[.,]\d))?"
+    r"\s*(?P<suffix_currency>CAD|USD)?\s*"
+    r"(?:(?:/|per\s+|an?\s+)?(?P<unit>hourly|hours?|hrs?|yearly|years?|annum|annually|annual|"
+    r"monthly|months?|weekly|weeks?|daily|days?)\b)?"
+    r"\s*(?P<end_currency>CAD|USD)?",
+    re.IGNORECASE,
+)
+_PAY_LABEL = re.compile(r"\b(?:pay(?:\s+(?:rate|range))?|salary|compensation|wages?)\s*:?\s*$", re.IGNORECASE)
+
+
+def _format_pay(amounts: list[float], currency: str, interval: str) -> str:
+    nums = [f"{value:,.2f}".rstrip("0").rstrip(".") for value in amounts]
     return f"{' - '.join(dict.fromkeys(nums))} {currency}{f' {interval}' if interval else ''}"
+
+
+def description_salary(description: str, default_currency: str = "CAD") -> str:
+    """Read explicit money amounts with a pay period or an adjacent salary label.
+
+    Unlabelled amounts without a period may be bonuses or benefits, so skip them.
+    A labelled amount without a period stays unspecified rather than guessing one.
+    """
+    text = re.sub(r"[*_]", "", description)
+    for match in _DESCRIPTION_PAY.finditer(text):
+        unit = (match["unit"] or "").lower()
+        if not unit and not _PAY_LABEL.search(text[:match.start()]):
+            continue
+        amounts = []
+        for raw in (match["lo"], match["hi"]):
+            if raw:
+                amounts.append(float(raw.rstrip("kK").replace(",", "")) * (1000 if raw[-1].lower() == "k" else 1))
+        if any(value <= 0 for value in amounts) or (len(amounts) == 2 and amounts[0] > amounts[1]):
+            continue
+        currency_text = (match["suffix_currency"] or match["end_currency"] or match["currency"]).upper()
+        currency = "USD" if currency_text.startswith("US") else "CAD" if currency_text.startswith("C") else default_currency
+        interval = ""
+        if unit:
+            if unit.startswith("h"):
+                interval = "hourly"
+            elif unit.startswith(("y", "a")):
+                interval = "yearly"
+            elif unit.startswith("m"):
+                interval = "monthly"
+            elif unit.startswith("w"):
+                interval = "weekly"
+            else:
+                interval = "daily"
+        return _format_pay(amounts, currency, interval)
+    return ""
+
+
+def format_salary(row: dict[str, object]) -> str:
+    lo, hi = row.get("min_amount"), row.get("max_amount")
+    amounts = [float(v) for v in (lo, hi) if isinstance(v, (int, float)) and math.isfinite(v)]
+    currency = clean(row.get("currency")) or "CAD"
+    if not amounts:
+        return description_salary(clean_text(row.get("description")), currency)
+    interval = clean(row.get("interval"))
+    return _format_pay(amounts, currency, interval)
 
 
 def _jobspy_logger_name(site: str) -> str:
