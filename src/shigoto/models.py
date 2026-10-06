@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import asdict, dataclass
 from datetime import date
-from typing import Literal
+from typing import Literal, cast
 
 
 @dataclass
@@ -31,3 +32,21 @@ class Job:
 
 
 Liveness = Literal["gone", "alive", "unknown"]
+
+
+def job_json(job: Job) -> str:
+    """Snapshot an adapter's job before normalization mutates it."""
+    data = asdict(job)
+    data["posted_date"] = job.posted_date.isoformat() if job.posted_date else None
+    return json.dumps(data)
+
+
+def job_from_json(raw: str) -> Job:
+    data = cast(dict[str, str], json.loads(raw))
+    posted = cast(str | None, data["posted_date"])
+    return Job(
+        source=data["source"], source_id=data["source_id"], url=data["url"], title=data["title"],
+        company=data["company"], location=data["location"], description=data["description"],
+        posted_date=date.fromisoformat(posted) if posted else None,
+        salary=data["salary"], job_type=data["job_type"], city=data["city"],
+    )

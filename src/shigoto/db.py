@@ -4,8 +4,8 @@
 we've seen to its job. Postings only merge across sources: two ids from the same source
 are always two jobs, even with identical company/title/city. A job's fields come from its primary (first) source; other
 sources only fill blanks, so the content hash doesn't flip-flop between sources.
-`content_hash` changes only on material edits, and `synced_hash` records the content
-hash plus status the Google Sheet last received, so `unsynced()` is the delta to push.
+`content_hash` tracks title and description edits. Reviewer data is backed up before
+each sheet rebuild; excluded jobs and their reviews remain here as history.
 """
 
 from __future__ import annotations
@@ -18,8 +18,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from shigoto.models import Job, Liveness
-from shigoto.normalize import dedupe_key, fold
+from shigoto.config import Config
+from shigoto.models import Job, Liveness, job_json
+from shigoto.normalize import dedupe_key, title_matches
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -40,10 +41,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at TEXT NOT NULL,
     description_checked_at TEXT,
     ai_reviewed_at TEXT,
-    synced_hash TEXT,
-    synced_at TEXT,
     closed_at TEXT,
-    liveness_checked_at TEXT
+    liveness_checked_at TEXT,
+    excluded_at TEXT
 );
 CREATE TABLE IF NOT EXISTS job_sources (
     source TEXT NOT NULL,
@@ -52,9 +52,19 @@ CREATE TABLE IF NOT EXISTS job_sources (
     url TEXT NOT NULL,
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL,
+    raw TEXT,
     PRIMARY KEY (source, source_id)
 );
 CREATE INDEX IF NOT EXISTS job_sources_job ON job_sources(job_id);
+CREATE TABLE IF NOT EXISTS reviews (
+    job_id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY,
     started_at TEXT NOT NULL,
@@ -68,7 +78,6 @@ FULL_LISTING_SOURCES = frozenset({
     "workday", "smartrecruiters", "greenhouse", "lever", "ashby", "successfactors", "gcjobs",
 })
 CLOSED_AFTER = timedelta(days=2)
-
 
 @dataclass(frozen=True)
 class StoredJob:
@@ -90,11 +99,6 @@ class StoredJob:
     content_hash: str
     status: Literal["", "Closed"]
 
-    @property
-    def sync_hash(self) -> str:
-        """Blank status keeps the fingerprint used before status tracking."""
-        return self.content_hash + self.status
-
 
 @dataclass(frozen=True)
 class DescriptionTarget:
@@ -102,13 +106,11 @@ class DescriptionTarget:
     source_id: str
     url: str
 
-
 @dataclass(frozen=True)
 class SourceLink:
     source: str
     source_id: str
     url: str
-
 
 @dataclass(frozen=True)
 class LivenessTarget:
@@ -123,9 +125,9 @@ def make_job_id(job: Job, distinct: bool = False) -> str:
     return hashlib.sha1(key.encode()).hexdigest()[:16]
 
 
-def content_hash(title: str, company: str, location: str, salary: str, description: str) -> str:
-    material = "\x1f".join(" ".join(fold(v).split()) for v in (title, company, location, salary, description))
-    return hashlib.sha1(material.encode()).hexdigest()
+def content_hash(title: str, description: str) -> str:
+    """Only title and description edits require another review."""
+    return hashlib.sha1(json.dumps([title, description]).encode()).hexdigest()
 
 
 def now_iso() -> str:
@@ -139,16 +141,26 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(jobs)")}
-        for column in ("closed_at", "liveness_checked_at"):
+        for column in ("closed_at", "liveness_checked_at", "excluded_at"):
             if column not in columns:
                 self.conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
+        source_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(job_sources)")}
+        if "raw" not in source_columns:
+            self.conn.execute("ALTER TABLE job_sources ADD COLUMN raw TEXT")
+        if self.conn.execute("SELECT 1 FROM meta WHERE key='content_hash_version'").fetchone() is None:
+            self.conn.executemany(
+                "UPDATE jobs SET content_hash=? WHERE job_id=?",
+                [(content_hash(row["title"], row["description"]), row["job_id"])
+                 for row in self.conn.execute("SELECT job_id, title, description FROM jobs")],
+            )
+            self.conn.execute("INSERT INTO meta (key, value) VALUES ('content_hash_version', '2')")
         self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
 
-    def upsert(self, job: Job, now: str) -> UpsertResult:
-        """Insert or merge one normalized job. Commit is left to the caller."""
+    def upsert(self, job: Job, now: str, *, raw: str | None = None, seen: bool = True) -> UpsertResult:
+        """Merge a normalized job. `seen=False` replays raw data without changing recency or closure."""
         c = self.conn
         mapped = c.execute("SELECT job_id FROM job_sources WHERE source=? AND source_id=?",
                            (job.source, job.source_id)).fetchone()
@@ -157,15 +169,17 @@ class Store:
                                     (job_id, job.source)).fetchone():
             job_id = make_job_id(job, distinct=True)  # same source, different id: a separate posting
         c.execute(
-            """INSERT INTO job_sources (source, source_id, job_id, url, first_seen, last_seen)
-               VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT (source, source_id) DO UPDATE SET last_seen=excluded.last_seen, url=excluded.url""",
-            (job.source, job.source_id, job_id, job.url, now, now),
+            """INSERT INTO job_sources (source, source_id, job_id, url, first_seen, last_seen, raw)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (source, source_id) DO UPDATE SET
+               last_seen=CASE WHEN ? THEN excluded.last_seen ELSE job_sources.last_seen END,
+               url=excluded.url, raw=excluded.raw""",
+            (job.source, job.source_id, job_id, job.url, now, now, raw if raw is not None else job_json(job), seen),
         )
         posted = job.posted_date.isoformat() if job.posted_date else None
         row = c.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
         if row is None:
-            h = content_hash(job.title, job.company, job.location, job.salary, job.description)
+            h = content_hash(job.title, job.description)
             c.execute(
                 """INSERT INTO jobs (job_id, primary_source, title, company, city, location, description,
                    posted_date, salary, job_type, url, content_hash, first_seen, last_seen, updated_at)
@@ -183,18 +197,19 @@ class Store:
             "description": job.description if (job.description and (primary or not row["description"]))
             else row["description"],
             "salary": job.salary if (job.salary and (primary or not row["salary"])) else row["salary"],
-            "job_type": row["job_type"] or job.job_type,
+            "job_type": (job.job_type or row["job_type"]) if primary else row["job_type"] or job.job_type,
+            "city": job.city if primary else row["city"],
         }
-        h = content_hash(merged["title"], merged["company"], merged["location"], merged["salary"],
-                         merged["description"])
+        h = content_hash(merged["title"], merged["description"])
         changed = h != row["content_hash"]
         c.execute(
             """UPDATE jobs SET title=:title, company=:company, location=:location, description=:description,
-               salary=:salary, job_type=:job_type, posted_date=coalesce(posted_date, :posted),
-               content_hash=:hash, closed_at=NULL,
-               last_seen=:now, updated_at=CASE WHEN :changed THEN :now ELSE updated_at END
+               salary=:salary, job_type=:job_type, city=:city, posted_date=coalesce(posted_date, :posted),
+               content_hash=:hash, closed_at=CASE WHEN :seen THEN NULL ELSE closed_at END,
+               last_seen=CASE WHEN :seen THEN :now ELSE last_seen END,
+               updated_at=CASE WHEN :changed THEN :now ELSE updated_at END
                WHERE job_id=:job_id""",
-            {**merged, "posted": posted, "hash": h, "now": now, "changed": changed, "job_id": job_id},
+            {**merged, "posted": posted, "hash": h, "now": now, "changed": changed, "seen": seen, "job_id": job_id},
         )
         return "changed" if changed else "seen"
 
@@ -213,7 +228,7 @@ class Store:
 
     def set_description(self, job_id: str, description: str, now: str) -> None:
         row = self.conn.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
-        h = content_hash(row["title"], row["company"], row["location"], row["salary"], description)
+        h = content_hash(row["title"], description)
         self.conn.execute(
             """UPDATE jobs SET description=?, description_checked_at=?, content_hash=?,
                updated_at=CASE WHEN content_hash != ? THEN ? ELSE updated_at END WHERE job_id=?""",
@@ -251,12 +266,12 @@ class Store:
         )
         self.conn.commit()
 
-    def unsynced(self) -> list[StoredJob]:
-        """Content changes or confirmed status changes since the previous sheet sync."""
+    def visible_jobs(self) -> list[StoredJob]:
+        """All currently included jobs, with a stable order for the sheet rebuild."""
         rows = self.conn.execute(
             """SELECT j.*, (SELECT group_concat(source || ' ' || url, char(10)) FROM job_sources s
                             WHERE s.job_id = j.job_id) AS sources
-               FROM jobs j
+               FROM jobs j WHERE excluded_at IS NULL
                ORDER BY first_seen, job_id"""
         ).fetchall()
         return [
@@ -268,18 +283,56 @@ class Store:
                 status="Closed" if r["closed_at"] is not None else "",
             )
             for r in rows
-            if r["synced_hash"] != r["content_hash"] + ("Closed" if r["closed_at"] is not None else "")
         ]
 
-    def mark_synced(self, jobs: list[StoredJob], now: str) -> None:
-        self.conn.executemany("UPDATE jobs SET synced_hash=?, synced_at=? WHERE job_id=?",
-                              [(j.sync_hash, now, j.job_id) for j in jobs])
+    def reevaluate_exclusions(self, config: Config, now: str) -> int:
+        """Hide jobs outside current city/title filters, retaining their history and reviews."""
+        cities = {city.name for city in config.cities}
+        excluded = 0
+        for row in self.conn.execute("SELECT job_id, city, title FROM jobs").fetchall():
+            passes = (row["city"] in cities and title_matches(row["title"], config.title_keywords)
+                      and not title_matches(row["title"], config.exclude_title_keywords))
+            excluded += not passes
+            self.conn.execute(
+                "UPDATE jobs SET excluded_at=CASE WHEN ? THEN NULL ELSE coalesce(excluded_at, ?) END WHERE job_id=?",
+                (passes, now, row["job_id"]),
+            )
+        self.conn.commit()
+        return excluded
+
+    def reviewer_columns(self) -> list[str] | None:
+        row = self.conn.execute("SELECT value FROM meta WHERE key='reviewer_columns'").fetchone()
+        return json.loads(row["value"]) if row else None
+
+    def reviews(self) -> dict[str, dict[str, str]]:
+        return {row["job_id"]: json.loads(row["data"]) for row in self.conn.execute("SELECT job_id, data FROM reviews")}
+
+    def sheet_rebuild_pending(self) -> bool:
+        return self.conn.execute("SELECT 1 FROM meta WHERE key='sheet_rebuild_pending'").fetchone() is not None
+
+    def finish_sheet_rebuild(self) -> None:
+        self.conn.execute("DELETE FROM meta WHERE key='sheet_rebuild_pending'")
         self.conn.commit()
 
-    def set_ai_reviewed(self, reviewed: dict[str, str]) -> None:
-        self.conn.executemany("UPDATE jobs SET ai_reviewed_at=? WHERE job_id=?",
-                              [(v or None, k) for k, v in reviewed.items()])
+    def backup_reviews(self, columns: list[str], reviews: dict[str, dict[str, str]], now: str) -> int:
+        """Commit reviewer values and header order before any sheet writes. Return unknown job count."""
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('reviewer_columns', ?) ON CONFLICT (key) DO UPDATE SET value=excluded.value",
+            (json.dumps(columns),),
+        )
+        self.conn.executemany(
+            """INSERT INTO reviews (job_id, data, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT (job_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at""",
+            [(job_id, json.dumps(data), now) for job_id, data in reviews.items()],
+        )
+        if "AI Reviewed At" in columns:
+            self.conn.executemany("UPDATE jobs SET ai_reviewed_at=? WHERE job_id=?",
+                                  [(data["AI Reviewed At"] or None, job_id) for job_id, data in reviews.items()])
+        known = {row["job_id"] for row in self.conn.execute("SELECT job_id FROM jobs")}
+        # A failed rebuild can temporarily pair new IDs with old reviewer cells.
+        self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('sheet_rebuild_pending', '1')")
         self.conn.commit()
+        return len(reviews.keys() - known)
 
     def start_run(self, now: str) -> int:
         cur = self.conn.execute("INSERT INTO runs (started_at) VALUES (?)", (now,))

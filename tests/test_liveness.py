@@ -124,7 +124,7 @@ def test_every_source_must_confirm_gone(monkeypatch: MonkeyPatch, tmp_path: Path
     monkeypatch.setattr("shigoto.liveness.check_source", check)
     monkeypatch.setattr("shigoto.liveness.now_iso", lambda: "2026-10-04T12:00:00+00:00")
     assert check_liveness(store, config) == {"liveness_checked": 1, "closed": int(result == "Closed")}
-    assert store.unsynced()[0].status == result
+    assert store.visible_jobs()[0].status == result
     assert [link.url for link in calls] == ["https://example.com/greenhouse", "https://example.com/lever"]
     assert check_liveness(store, config) == {"liveness_checked": 0, "closed": 0}
 

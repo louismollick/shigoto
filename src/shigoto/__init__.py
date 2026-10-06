@@ -2,6 +2,7 @@
 
 CLI:
   shigoto run [--no-sheet] [--only linkedin,indeed,...]   one run, then exit
+  shigoto reprocess [--no-sheet]                      replay saved source records
   shigoto serve                                            run every `interval_hours`, forever
 """
 
@@ -16,14 +17,14 @@ from pathlib import Path
 
 from shigoto.config import Config, load_config
 from shigoto.db import Store
-from shigoto.pipeline import run_once
+from shigoto.pipeline import reprocess, run_once
 
 log = logging.getLogger("shigoto")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="shigoto")
-    parser.add_argument("command", choices=["run", "serve"])
+    parser.add_argument("command", choices=["run", "serve", "reprocess"])
     parser.add_argument("--config", type=Path, default=Path(os.environ.get("SHIGOTO_CONFIG", "config.yaml")))
     parser.add_argument("--no-sheet", action="store_true", help="skip the Google Sheets sync")
     parser.add_argument("--only", help="comma-separated source names, e.g. indeed,jobbank")
@@ -34,6 +35,8 @@ def main() -> None:
     only = set(args.only.split(",")) if args.only else None
     if args.command == "run":
         run_once(config, sync_sheet=not args.no_sheet, only=only)
+    elif args.command == "reprocess":
+        reprocess(config, sync_sheet=not args.no_sheet)
     else:
         serve(config, sync_sheet=not args.no_sheet)
 
