@@ -13,6 +13,12 @@ search_terms:
   - food testing
   - environmental laboratory
   - molecular biology
+  - QA technician
+  - QC technician
+  - quality technician
+  - lab technician
+  - HACCP
+  - SQF
 
 # Aliases are suburbs/boroughs that count as the city for sources that search nationwide.
 cities:
@@ -23,17 +29,13 @@ cities:
     jobspy_location: Toronto, ON
     aliases: [Mississauga, Brampton, Markham, Vaughan, Richmond Hill, Etobicoke, Scarborough, North York,
               Oakville, Concord, Woodbridge, Pickering, Ajax, Milton, Bolton, Newmarket, Aurora, Burlington]
-  - name: Montreal
-    jobspy_location: Montreal, QC
-    aliases: [Laval, Longueuil, Saint-Laurent, Saint-Leonard, Mount Royal, Mont-Royal, Pointe-Claire, Dorval,
-              Boucherville, Brossard, Kirkland, Anjou, Lachine, Vaudreuil-Dorion, Terrebonne, Saint-Hubert]
   - name: Vancouver
     jobspy_location: Vancouver, BC
     aliases: [Burnaby, Surrey, Richmond, Coquitlam, Port Coquitlam, New Westminster, Delta, North Vancouver,
               Langley, Abbotsford]
   - name: Ottawa
     jobspy_location: Ottawa, ON
-    aliases: [Kanata, Nepean, Orleans, Gatineau, Gloucester]
+    aliases: [Kanata, Nepean, Orleans, Gloucester]
 
 # LinkedIn: one OR-combined query per city (5 search requests + pagination per run), with
 # a 90s gap between cities. JobSpy's README: LinkedIn blocks around the 10th page per IP.
@@ -65,17 +67,16 @@ descriptions:
 
 # Every job's title must contain one of these (case/accent-insensitive, whole word; trailing * = prefix).
 # This is the main relevance filter: Indeed and Workday also match descriptions, so "food safety"
-# otherwise pulls in every line cook with a food-handler certificate. French for Quebec employers.
+# otherwise pulls in every line cook with a food-handler certificate.
 title_keywords: [microbiolog*, laborator*, lab, quality, QA, QC, FSQA, HACCP, food safety, food scien*,
                  food technolog*, food quality, food testing, molecular, environment*, analytical,
                  scientist*, research*, chemist*, biochem*, biolog*, biotech*, sample, samples, HPLC, assay*,
                  stability, sanitation, regulatory, validation, product develop*, R&D,
-                 in vivo, OOS, GC, GCMS*, LCMS*, ICP*, spectro*, chromatograph*,
-                 laboratoire*, qualite, chimiste*, salubrite, scientifique*, recherche, assurance, controle]
+                 in vivo, OOS, GC, GCMS*, LCMS*, ICP*, spectro*, chromatograph*, SQF]
 
 # Then dropped if the title contains any of these (same matching rules).
 exclude_title_keywords: [software, SDET, tester, game, games, QA automation, test automation, web developer,
-                         full stack, frontend, backend, devops, dental, IT]
+                         full stack, frontend, backend, devops, dental, IT, bilingual, bilingue, French]
 
 # Verified 2026-10-06 (see README). Workday/SmartRecruiters search per term server-side.
 boards:
