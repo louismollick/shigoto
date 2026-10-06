@@ -20,6 +20,10 @@ source adapter -> canonical Job -> normalize -> cross-source dedupe -> SQLite ->
 
 Employer boards live in `config.yaml` (`boards:`). Each was verified on 2026-10-06 to have Canadian postings. Employers on unsupported ATSes (Oracle, SuccessFactors, Taleo, iCIMS, Rippling) include Intertek, Bureau Veritas, Charles River, Cargill and Maple Leaf Foods. Most of their postings still reach us through Indeed and LinkedIn.
 
+## Relevance filter
+
+Indeed and Workday match search terms against descriptions, so "food safety" alone would pull in every line cook with a food-handler certificate. Every job's title must therefore contain one of `title_keywords` (whole word, or prefix with a trailing `*`), and none of `exclude_title_keywords`. Only jobs in the configured cities (or their suburb aliases) are kept.
+
 ## Dedup and change detection
 
 - `job_sources` maps every `(source, source_id)` to a `job_id`, so the same posting seen again is always the same job.
