@@ -1,0 +1,109 @@
+# shigoto config. Secrets/paths come from env: GOOGLE_APPLICATION_CREDENTIALS, SHIGOTO_SPREADSHEET_ID, SHIGOTO_DB.
+
+interval_hours: 6
+
+search_terms:
+  - microbiology
+  - laboratory technician
+  - laboratory analyst
+  - quality assurance
+  - quality control
+  - food safety
+  - food science
+  - food testing
+  - environmental laboratory
+  - molecular biology
+
+# Aliases are suburbs/boroughs that count as the city for sources that search nationwide.
+cities:
+  - name: Calgary
+    jobspy_location: Calgary, AB
+    aliases: [Airdrie, Okotoks, Chestermere, Cochrane]
+  - name: Toronto
+    jobspy_location: Toronto, ON
+    aliases: [Mississauga, Brampton, Markham, Vaughan, Richmond Hill, Etobicoke, Scarborough, North York,
+              Oakville, Concord, Woodbridge, Pickering, Ajax, Milton, Bolton, Newmarket, Aurora, Burlington]
+  - name: Montreal
+    jobspy_location: Montreal, QC
+    aliases: [Laval, Longueuil, Saint-Laurent, Saint-Leonard, Mount Royal, Mont-Royal, Pointe-Claire, Dorval,
+              Boucherville, Brossard, Kirkland, Anjou, Lachine, Vaudreuil-Dorion, Terrebonne, Saint-Hubert]
+  - name: Vancouver
+    jobspy_location: Vancouver, BC
+    aliases: [Burnaby, Surrey, Richmond, Coquitlam, Port Coquitlam, New Westminster, Delta, North Vancouver,
+              Langley, Abbotsford]
+  - name: Ottawa
+    jobspy_location: Ottawa, ON
+    aliases: [Kanata, Nepean, Orleans, Gatineau, Gloucester]
+
+# LinkedIn: one OR-combined query per city (5 search requests + pagination per run), with
+# a 90s gap between cities. JobSpy's README: LinkedIn blocks around the 10th page per IP.
+# Indeed has no practical rate limit, so it runs every term x city.
+jobspy:
+  - site: indeed
+    results_wanted: 50
+    hours_old: 24
+    delay_seconds: 2
+  - site: linkedin
+    combine_terms: true
+    results_wanted: 30
+    hours_old: 24
+    delay_seconds: 90
+  # Off by default: no descriptions, blocks after ~30 requests, mostly duplicates Indeed.
+  - site: glassdoor
+    enabled: false
+    combine_terms: true
+    results_wanted: 30
+    hours_old: 24
+    delay_seconds: 30
+
+jobbank_enabled: true
+
+descriptions:
+  linkedin_max_per_run: 25
+  linkedin_delay_seconds: 10
+  jobbank_max_per_run: 60
+
+# Whole-board ATS sources (Greenhouse/Lever/Ashby) keep only titles starting a word with one of these.
+ats_title_keywords: [microbiolog, laborator, lab tech, lab analyst, lab assistant, quality, QA, QC, food, molecular, environmental, analyst,
+                     technician, technologist, scientist, research associate, chemist, biolog]
+
+# Dropped everywhere (Indeed also matches descriptions, so "quality assurance" pulls in software QA).
+# Matching is case-insensitive word-prefix, so keep these specific ("developer" would drop food Product Developers).
+exclude_title_keywords: [software, SDET, QA automation, test automation, automation tester, web developer,
+                         full stack, frontend, backend, devops]
+
+# Verified 2026-10-06 (see README). Workday/SmartRecruiters search per term server-side.
+boards:
+  workday:
+    - {name: Thermo Fisher Scientific, url: "https://thermofisher.wd5.myworkdayjobs.com/ThermoFisherCareers"}
+    - {name: ALS Global, url: "https://alsglobal.wd103.myworkdayjobs.com/External"}
+    - {name: Core Laboratories, url: "https://corelab.wd12.myworkdayjobs.com/CLB"}
+    - {name: Sanofi, url: "https://sanofi.wd3.myworkdayjobs.com/SanofiCareers"}
+    - {name: STEMCELL Technologies, url: "https://stemcell.wd3.myworkdayjobs.com/External_Careers"}
+    - {name: Saputo, url: "https://saputo.wd5.myworkdayjobs.com/Saputo_External_Careers"}
+    - {name: Agropur, url: "https://agropur.wd3.myworkdayjobs.com/Agropur_Careers"}
+    - {name: Mondelez International, url: "https://mdlz.wd3.myworkdayjobs.com/External"}
+    - {name: Kraft Heinz, url: "https://heinz.wd1.myworkdayjobs.com/KraftHeinz_Careers"}
+    - {name: General Mills, url: "https://genmills.wd1.myworkdayjobs.com/GMI_External_Careers"}
+    - {name: Labatt / AB InBev, url: "https://abinbev.wd1.myworkdayjobs.com/CAN"}
+    - {name: Amgen, url: "https://amgen.wd1.myworkdayjobs.com/Careers"}
+    - {name: Gilead Sciences, url: "https://gilead.wd1.myworkdayjobs.com/gileadcareers"}
+    - {name: Ecolab, url: "https://ecolab.wd1.myworkdayjobs.com/Ecolab_External"}
+    - {name: Solenis / Diversey, url: "https://solenis.wd1.myworkdayjobs.com/Solenis"}
+    - {name: Agilent Technologies, url: "https://agilent.wd5.myworkdayjobs.com/Agilent_Careers"}
+    - {name: AstraZeneca, url: "https://astrazeneca.wd3.myworkdayjobs.com/Careers"}
+    - {name: Ardent Mills, url: "https://ardentmills.wd5.myworkdayjobs.com/Ardent_Mills_LLC"}
+  greenhouse:
+    - {name: AbCellera, slug: abcellera}
+    - {name: Aspect Biosystems, slug: aspectbiosystems}
+  lever:
+    - {name: Deep Genomics, slug: deepgenomics}
+  ashby:
+    - {name: Nomic, slug: nomic}
+  smartrecruiters:
+    - {name: Eurofins, slug: Eurofins}
+    - {name: SGS, slug: SGS}
+
+sheet:
+  worksheet: Shigoto
+  description_max_chars: 20000
