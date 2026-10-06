@@ -20,6 +20,13 @@ search_terms:
   - lab technician
   - HACCP
   - SQF
+  - QC analyst
+  - microbiologist
+  - food technologist
+  - GMP
+  - sanitation technician
+  - laboratory assistant
+  - quality associate
 
 # Aliases are suburbs/boroughs that count as the city for sources that search nationwide.
 cities:
@@ -74,11 +81,12 @@ title_keywords: [microbiolog*, laborator*, lab, quality, QA, QC, FSQA, HACCP, fo
                  food technolog*, food quality, food testing, molecular, environment*, analytical,
                  scientist*, research*, chemist*, biochem*, biolog*, biotech*, sample, samples, HPLC, assay*,
                  stability, sanitation, regulatory, validation, product develop*, R&D,
-                 in vivo, OOS, GC, GCMS*, LCMS*, ICP*, spectro*, chromatograph*, SQF]
+                 in vivo, OOS, GC, GCMS*, LCMS*, ICP*, spectro*, chromatograph*, SQF,
+                 analyst*, assurance, sterility, QMS, technologist*, testing, GMP]
 
 # Then dropped if the title contains any of these (same matching rules).
 exclude_title_keywords: [software, SDET, tester, game, games, QA automation, test automation, web developer,
-                         full stack, frontend, backend, devops, dental, IT, bilingual, bilingue, French]
+                         full stack, frontend, backend, devops, dental, IT, bilingue, French]
 
 # Verified 2026-10-06 (see README). Workday/SmartRecruiters/SuccessFactors search per term server-side.
 boards:
