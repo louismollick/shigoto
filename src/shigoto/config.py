@@ -77,6 +77,7 @@ class Boards(BaseModel):
 class SheetConfig(BaseModel):
     spreadsheet_id: str = ""  # usually from SHIGOTO_SPREADSHEET_ID
     worksheet: str = "Shigoto"
+    worksheet_id: int | None = Field(default=None, ge=0)
     description_max_chars: int = 20000
 
 

@@ -37,13 +37,20 @@ Indeed and Workday match search terms against descriptions, so "food safety" alo
 
 ## Google Sheet
 
-Only the `Shigoto` tab is touched (created on first run). The app owns columns `Job ID` through `Description`, including `Status` just after `Updated At`. A non-empty header must match that app-owned prefix exactly; an unfamiliar layout stops sync before any writes. The legacy layout without `Status` is no longer supported. Duplicate Job IDs or reviewer header names also stop sync before writes to avoid overwriting reviews.
+The canonical tab is `Jobs to Review`. The configured `sheet.worksheet_id` identifies the existing master tab across renames; a missing explicit ID stops the run rather than falling back to a same-named lookup view. Without an ID, `sheet.worksheet` selects the tab by name and creates it when missing. The app owns columns `Job ID` through `Description`, including `Status` just after `Updated At`. A non-empty header must match that app-owned prefix exactly; an unfamiliar layout stops sync before any writes. The legacy layout without `Status` is no longer supported. Duplicate Job IDs or reviewer header names also stop sync before writes to avoid overwriting reviews.
 
 Every column to the right of `Description` belongs to the reviewer. Names and order can change, and blank headers get a stable name such as `Column X`. At the start of every sync, the app reads the entire tab and commits all reviewer values, including cleared cells, to SQLite's `reviews` table. `meta` stores their header order. `AI Reviewed At` is also copied into `jobs.ai_reviewed_at` by header name; removing that header leaves the stored timestamp alone. Rows with IDs absent from SQLite have their reviews backed up, but are removed from the sheet with a warning.
 
 The app then rebuilds the tab from SQLite in `first_seen`, `job_id` order, pairing each job with its saved reviewer values. Excluded jobs stay hidden; confirmed closed jobs remain visible with `Status = Closed`. The grid shrinks to the written rows and columns. Writes use chunks of at most 200 jobs. App values are written raw so job text cannot become a formula; reviewer values use Google Sheets' user-entered parsing for numbers, dates and checkboxes. Backups contain formatted strings, not formulas or cell formatting. Avoid reviewer edits while a sync is running because the rebuild uses the snapshot taken at its start. If a rebuild fails partway through, the next sync restores the committed snapshot before accepting further reviewer changes; wait for a successful rebuild before editing again.
 
-ChatGPT should skip rows with `Status = Closed`. An open row needs review when `AI Reviewed At` is blank or earlier than `Updated At`.
+ChatGPT should read all underlying rows, including filtered-out rows, and skip rows with `Status = Closed`. An open row needs review when `AI Reviewed At` is blank or earlier than `Updated At`. Review writes must match Job IDs because users can sort the master table. The `Closed` tab is a formula view; rows remain in the master table and review backups stay keyed by Job ID.
+
+After every sync, `shigoto.sheet_controls.configure_tracker` reapplies native controls; no Apps Script is needed. `Application Status` and `Application Stage` get dropdowns. `Applied At` and `Follow-up Date` get date formats and a date picker. If the tab has no basic filter, one is created that hides `Status = Closed` and `AI Decision = Reject` (blanks stay visible) and sorts by `AI Score`, highest first. An existing filter keeps its criteria and sort, even when both are empty; only its range grows to cover the rebuilt grid. Cell values are never written.
+
+The `Closed` tab is read-only and built from two formulas. Widen both if reviewer columns go past X:
+
+- A1: `=ARRAYFORMULA('Jobs to Review'!A1:X1)`
+- A2: `=IFNA(FILTER('Jobs to Review'!A2:X,'Jobs to Review'!M2:M="Closed"),"")`
 
 ## Config
 

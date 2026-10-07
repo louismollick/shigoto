@@ -11,6 +11,7 @@ from shigoto.enrich import enrich_descriptions
 from shigoto.liveness import check_liveness, reset_robots
 from shigoto.models import job_from_json, job_json
 from shigoto.normalize import CityMatcher, normalize
+from shigoto.sheet_controls import configure_tracker
 from shigoto.sheets import open_worksheet, sync
 from shigoto.sources import Source, build_sources
 
@@ -69,7 +70,10 @@ def ingest(store: Store, source: Source, matcher: CityMatcher, config: Config) -
 def sync_to_sheet(store: Store, config: Config) -> dict[str, int]:
     if config.google_credentials is None or not config.sheet.spreadsheet_id:
         raise RuntimeError("GOOGLE_APPLICATION_CREDENTIALS and SHIGOTO_SPREADSHEET_ID must be set")
-    return sync(store, open_worksheet(config.google_credentials, config.sheet), config)
+    ws = open_worksheet(config.google_credentials, config.sheet)
+    stats = sync(store, ws, config)
+    configure_tracker(ws)
+    return stats
 
 
 def reprocess(config: Config, *, sync_sheet: bool = True) -> dict[str, int]:

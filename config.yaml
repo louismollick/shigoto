@@ -128,5 +128,6 @@ boards:
     - {name: SGS, slug: SGS}
 
 sheet:
-  worksheet: Shigoto
+  worksheet: Jobs to Review
+  worksheet_id: 589266369
   description_max_chars: 20000

@@ -325,3 +325,32 @@ def test_new_worksheet_header_and_format(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert worksheet is cast(gspread.Worksheet, ws)
     assert ws.writes == []  # sync writes the header after backing up.
     assert ws.frozen_rows == 1 and ws.formatted_ranges == ["1:1", "A:Q"]
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_explicit_worksheet_id_survives_rename_and_never_falls_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, missing: bool,
+) -> None:
+    ws = FakeWorksheet([])
+
+    class FakeSpreadsheet:
+        def get_worksheet_by_id(self, worksheet_id: int) -> gspread.Worksheet:
+            assert worksheet_id == 0
+            if missing:
+                raise gspread.WorksheetNotFound(worksheet_id)
+            return cast(gspread.Worksheet, ws)
+
+        def worksheet(self, title: str) -> gspread.Worksheet:
+            raise AssertionError("An explicit ID cannot fall back to a same-named view")
+
+    class FakeClient:
+        def open_by_key(self, key: str) -> FakeSpreadsheet:
+            return FakeSpreadsheet()
+
+    monkeypatch.setattr(gspread, "service_account", lambda filename: FakeClient())
+    config = SheetConfig(spreadsheet_id="sheet-id", worksheet="Renamed master", worksheet_id=0)
+    if missing:
+        with pytest.raises(gspread.WorksheetNotFound):
+            open_worksheet(tmp_path / "credentials.json", config)
+    else:
+        assert open_worksheet(tmp_path / "credentials.json", config) is cast(gspread.Worksheet, ws)

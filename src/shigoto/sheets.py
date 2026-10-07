@@ -35,6 +35,9 @@ def job_row(job: StoredJob, description_max: int) -> list[str]:
 def open_worksheet(credentials: Path, config: SheetConfig) -> gspread.Worksheet:
     client = gspread.service_account(filename=str(credentials))
     spreadsheet = client.open_by_key(config.spreadsheet_id)
+    # An explicit ID survives renames and must never fall back to another tab.
+    if config.worksheet_id is not None:
+        return spreadsheet.get_worksheet_by_id(config.worksheet_id)
     try:
         return spreadsheet.worksheet(config.worksheet)
     except gspread.WorksheetNotFound:
