@@ -114,18 +114,25 @@ def clean_text(value: object) -> str:
     return "" if value is None or (isinstance(value, float) and math.isnan(value)) else str(value)
 
 
+_UNIT = r"hourly|hours?|hrs?|yearly|years?|annum|annually|annual|monthly|months?|weekly|weeks?|daily|days?"
 _AMOUNT = r"\d+(?:,\d{3})*(?:\.\d{1,2})?[kK]?"
 _CURRENCY = r"CAD\s*\$?|USD\s*\$?|CA\$|C\$|US\$|\$"
 _DESCRIPTION_PAY = re.compile(
     rf"(?P<currency>{_CURRENCY})\s*(?P<lo>{_AMOUNT})(?!\d|[.,]\d)"
     rf"(?:\s*(?:[-–—]|to)\s*(?:{_CURRENCY})?\s*(?P<hi>{_AMOUNT})(?!\d|[.,]\d))?"
     r"\s*(?P<suffix_currency>CAD|USD)?\s*"
-    r"(?:(?:/|per\s+|an?\s+)?(?P<unit>hourly|hours?|hrs?|yearly|years?|annum|annually|annual|"
-    r"monthly|months?|weekly|weeks?|daily|days?)\b)?"
+    rf"(?:(?:/|per\s+|an?\s+)?(?P<unit>{_UNIT})\b)?"
     r"\s*(?P<end_currency>CAD|USD)?",
     re.IGNORECASE,
 )
-_PAY_LABEL = re.compile(r"\b(?:pay(?:\s+(?:rate|range))?|salary|compensation|wages?)\s*:?\s*$", re.IGNORECASE)
+# "Pay Rate:", "Salary", "hourly pay of", "annual salary is" directly before an amount.
+_PAY_LABEL = re.compile(
+    rf"\b(?:(?P<unit>{_UNIT})\s+)?(?:base\s+)?(?:pay|salary|compensation|wages?)(?:\s+(?:rate|range))?"
+    r"\s*(?::|\bof|\bis)?\s*$",
+    re.IGNORECASE,
+)
+# Extras like "Afternoon Shift Premium $2.00/hour" in the same clause as the amount are not base pay.
+_NOT_BASE_PAY = re.compile(r"\b(?:premiums?|bonus(?:es)?|differentials?|allowances?|stipends?)\b", re.IGNORECASE)
 
 
 def _format_pay(amounts: list[float], currency: str, interval: str) -> str:
@@ -136,13 +143,18 @@ def _format_pay(amounts: list[float], currency: str, interval: str) -> str:
 def description_salary(description: str, default_currency: str = "CAD") -> str:
     """Read explicit money amounts with a pay period or an adjacent salary label.
 
-    Unlabelled amounts without a period may be bonuses or benefits, so skip them.
+    Unlabelled amounts without a period may be bonuses or benefits, so skip them, as are
+    amounts in the same clause as a premium, bonus, differential, allowance or stipend.
     A labelled amount without a period stays unspecified rather than guessing one.
     """
     text = re.sub(r"[*_]", "", description)
     for match in _DESCRIPTION_PAY.finditer(text):
-        unit = (match["unit"] or "").lower()
-        if not unit and not _PAY_LABEL.search(text[:match.start()]):
+        prefix = text[:match.start()]
+        if _NOT_BASE_PAY.search(re.split(r"[.;!?](?:\s|$)|\n", prefix)[-1]):
+            continue
+        label = _PAY_LABEL.search(prefix)
+        unit = (match["unit"] or (label and label["unit"]) or "").lower()
+        if not match["unit"] and not label:
             continue
         amounts = []
         for raw in (match["lo"], match["hi"]):
