@@ -16,8 +16,8 @@ from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
 
-from shigoto.http import PoliteSession
-from shigoto.models import Job
+from shigoto.http import PoliteSession, posting_liveness
+from shigoto.models import Job, Liveness
 from shigoto.text import clean, html_to_text, parse_date
 
 log = logging.getLogger(__name__)
@@ -88,3 +88,8 @@ def fetch_description(job_url: str) -> str:
     page = _session.get_text(job_url)
     block = BeautifulSoup(page, "html.parser").select_one(".job-posting-detail-requirements")
     return html_to_text(str(block)) if block else ""
+
+
+def check_liveness(url: str, source_id: str) -> Liveness:
+    """Expired postings redirect to a 410 page."""
+    return posting_liveness(_session, url, lambda r: "job-posting-detail-requirements" in r.text)

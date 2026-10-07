@@ -13,7 +13,7 @@ from shigoto.db import SourceLink, Store
 from shigoto.http import PoliteSession, RateLimited, RobotsDisallowed
 from shigoto.liveness import check_liveness, check_source
 from shigoto.models import Job, Liveness
-from shigoto.sources import ats, gcjobs, successfactors, workday
+from shigoto.sources import ats, gcjobs, indeed, jobbank, linkedin_detail, successfactors, workday
 
 CHECKS: list[tuple[Callable[[str, str], Liveness], PoliteSession, str, str, object]] = [
     (workday.check_liveness, workday._session,
@@ -25,6 +25,8 @@ CHECKS: list[tuple[Callable[[str, str], Liveness], PoliteSession, str, str, obje
     (successfactors.check_liveness, successfactors._session, "https://example.com/job/1", "board:1",
      '<div class="jobdescription">Test samples.</div>'),
     (gcjobs.check_liveness, gcjobs._session, f"{gcjobs.DETAIL_URL}?poster=1", "1", '<main><h1>QA</h1><p>Test samples.</p></main>'),
+    (jobbank.check_liveness, jobbank._session, "https://www.jobbank.gc.ca/jobsearch/jobposting/1", "1",
+     '<div class="job-posting-detail-requirements">Test samples.</div>'),
 ]
 
 
@@ -130,4 +132,94 @@ def test_every_source_must_confirm_gone(monkeypatch: MonkeyPatch, tmp_path: Path
 
 
 def test_dispatcher_unknown_source() -> None:
-    assert check_source(SourceLink("indeed", "1", "https://example.com/1")) == "unknown"
+    assert check_source(SourceLink("glassdoor", "1", "https://example.com/1")) == "unknown"
+
+
+LINKEDIN_OPEN = '<h2 class="top-card-layout__title">QA</h2>'
+LINKEDIN_CLOSED = LINKEDIN_OPEN + '<figure class="closed-job"><span>No longer accepting applications</span></figure>'
+
+
+@pytest.mark.parametrize("status,page,expected", [
+    (200, LINKEDIN_OPEN, "alive"), (200, LINKEDIN_CLOSED, "gone"), (200, "<html></html>", "unknown"),
+    (404, "", "gone"), (410, "", "gone"), (429, "", "unknown"), (999, "", "unknown"),
+])
+def test_linkedin_classification(monkeypatch: MonkeyPatch, status: int, page: str, expected: Liveness) -> None:
+    calls: list[str] = []
+
+    def request(method: str, url: str, **kwargs: object) -> requests.Response:
+        calls.append(url)
+        result = response(url, page, status)
+        result.raise_for_status()
+        return result
+
+    monkeypatch.setattr(linkedin_detail._session, "request", request)
+    assert linkedin_detail.check_liveness("https://www.linkedin.com/jobs/view/42", "li-42") == expected
+    assert calls == ["https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/42"]
+
+
+def test_indeed_batches_and_ignores_unexpected_jobs(monkeypatch: MonkeyPatch) -> None:
+    queries: list[str] = []
+
+    def post_json(url: str, body: dict[str, str], **kwargs: object) -> object:
+        queries.append(body["query"])
+        if len(queries) == 2:
+            raise requests.ConnectionError()
+        return {"data": {"jobData": {"results": [
+            {"job": {"key": "k1", "expired": True}}, {"job": {"key": "k2", "expired": False}},
+            {"job": {"key": "k3", "expired": None}}, {"job": {"key": "other", "expired": True}},
+        ]}}}
+
+    monkeypatch.setattr(indeed, "BATCH_SIZE", 3)
+    monkeypatch.setattr(indeed._session, "post_json", post_json)
+    ids = ["in-k1", "in-k2", "in-k3", "in-k4"]
+    assert indeed.check_liveness(ids) == {"in-k1": "gone", "in-k2": "alive"}
+    assert ['"k1", "k2", "k3"' in queries[0], '"k4"' in queries[1]] == [True, True]
+
+
+def add(store: Store, source: str, source_id: str, title: str) -> None:
+    store.upsert(Job(source=source, source_id=source_id, url=f"https://example.com/{source_id}", title=title,
+                     company="Acme", location="Toronto", city="Toronto"), "2026-10-01T12:00:00+00:00")
+
+
+def test_indeed_answers_first_and_request_budget(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    config = Config(search_terms=[], cities=[], title_keywords=[], sheet=SheetConfig(), liveness_max_per_run=1)
+    store = Store(tmp_path / "t.db")
+    add(store, "indeed", "in-open", "QA A")
+    add(store, "linkedin", "li-1", "QA A")  # same job: Indeed says open, LinkedIn is never asked
+    add(store, "indeed", "in-expired", "QA B")
+    add(store, "jobbank", "jb-1", "QA C")
+    add(store, "jobbank", "jb-2", "QA D")  # one Job Bank job is over budget and left for the next run
+    store.commit()
+    calls: list[str] = []
+
+    def check(link: SourceLink) -> Liveness:
+        calls.append(link.source_id)
+        return "gone"
+
+    monkeypatch.setattr("shigoto.liveness.check_source", check)
+    monkeypatch.setattr(indeed, "check_liveness", lambda ids: {"in-open": "alive", "in-expired": "gone"})
+    monkeypatch.setattr("shigoto.liveness.now_iso", lambda: "2026-10-04T12:00:00+00:00")
+    assert check_liveness(store, config) == {"liveness_checked": 3, "closed": 2}
+    assert len(calls) == 1 and calls[0].startswith("jb-")
+    statuses = {j.title: j.status for j in store.visible_jobs()}
+    assert (statuses["QA A"], statuses["QA B"], sorted([statuses["QA C"], statuses["QA D"]])) == ("", "Closed", ["", "Closed"])
+    assert check_liveness(store, config) == {"liveness_checked": 1, "closed": 1}
+
+
+def test_inconclusive_linkedin_stops_linkedin_for_run(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    config = Config(search_terms=[], cities=[], title_keywords=[], sheet=SheetConfig())
+    store = Store(tmp_path / "t.db")
+    for n in range(3):
+        add(store, "linkedin", f"li-{n}", f"QA {n}")
+    add(store, "jobbank", "jb-1", "QA J")
+    store.commit()
+    calls: list[str] = []
+
+    def check(link: SourceLink) -> Liveness:
+        calls.append(link.source_id)
+        return "unknown" if link.source == "linkedin" else "gone"
+
+    monkeypatch.setattr("shigoto.liveness.check_source", check)
+    monkeypatch.setattr("shigoto.liveness.now_iso", lambda: "2026-10-04T12:00:00+00:00")
+    assert check_liveness(store, config) == {"liveness_checked": 2, "closed": 1}
+    assert len([c for c in calls if c.startswith("li-")]) == 1 and "jb-1" in calls

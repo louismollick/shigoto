@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from shigoto.config import City, Config, SheetConfig
-from shigoto.db import FULL_LISTING_SOURCES, Store
+from shigoto.db import DIRECT_CHECK_SOURCES, FULL_LISTING_SOURCES, Store
 from shigoto.models import Job, Liveness, job_from_json, job_json
 from shigoto.pipeline import reprocess
 
@@ -73,7 +73,7 @@ def test_board_job_needs_confirmed_closure(tmp_path: Path, source: str) -> None:
     assert closed.status == "Closed"
     assert closed.updated_at == open_job.updated_at == first_seen
     assert closed.content_hash == open_job.content_hash
-    assert store.liveness_candidates("2026-10-10T12:00:00+00:00", 40) == []
+    assert store.liveness_candidates("2026-10-10T12:00:00+00:00") == []
 
 @pytest.mark.parametrize("result", ["unknown", "alive"])
 def test_inconclusive_or_alive_check_stays_open(tmp_path: Path, result: Liveness) -> None:
@@ -86,17 +86,34 @@ def test_inconclusive_or_alive_check_stays_open(tmp_path: Path, result: Liveness
     assert store.visible_jobs()[0].status == ""
     row = store.conn.execute("SELECT closed_at, liveness_checked_at FROM jobs").fetchone()
     assert row["closed_at"] is None and row["liveness_checked_at"] == now
-    assert store.liveness_candidates("2026-10-05T11:59:59+00:00", 40) == []
-    assert len(store.liveness_candidates("2026-10-05T12:00:00+00:00", 40)) == 1
+    assert store.liveness_candidates("2026-10-05T11:59:59+00:00") == []
+    assert len(store.liveness_candidates("2026-10-05T12:00:00+00:00")) == 1
 
-@pytest.mark.parametrize("source", ["indeed", "linkedin", "glassdoor", "jobbank"])
-def test_recency_source_prevents_closure_candidate(tmp_path: Path, source: str) -> None:
+def test_unchecked_source_prevents_closure_candidate(tmp_path: Path) -> None:
     store = Store(tmp_path / "t.db")
     store.upsert(job(source="workday"), "2026-10-01T12:00:00+00:00")
-    store.upsert(job(source=source), "2026-10-01T12:00:00+00:00")
+    store.upsert(job(source="glassdoor"), "2026-10-01T12:00:00+00:00")
     store.commit()
-    assert store.liveness_candidates("2026-10-10T12:00:00+00:00", 40) == []
+    assert store.liveness_candidates("2026-10-10T12:00:00+00:00") == []
     assert store.visible_jobs()[0].status == ""
+
+
+@pytest.mark.parametrize("source", sorted(DIRECT_CHECK_SOURCES))
+def test_direct_check_source_is_candidate_while_listed(tmp_path: Path, source: str) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(source=source), "2026-10-04T12:00:00+00:00")
+    store.commit()
+    [candidate] = store.liveness_candidates("2026-10-04T12:00:00+00:00")
+    assert [link.source for link in candidate.sources] == [source]
+
+
+def test_recent_full_listing_sighting_prevents_closure_candidate(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(source="indeed"), "2026-10-01T12:00:00+00:00")
+    store.upsert(job(source="workday"), "2026-10-04T12:00:00+00:00")
+    store.commit()
+    assert store.liveness_candidates("2026-10-05T12:00:00+00:00") == []
+    assert len(store.liveness_candidates("2026-10-06T12:00:01+00:00")) == 1
 
 
 def test_reappearing_job_reopens(tmp_path: Path) -> None:
@@ -114,7 +131,8 @@ def test_reappearing_job_reopens(tmp_path: Path) -> None:
     assert reopened.status == ""
     assert reopened.updated_at == first_seen
     assert reopened.content_hash == closed.content_hash
-    assert store.conn.execute("SELECT closed_at FROM jobs").fetchone()[0] is None
+    # Recheck right away: Indeed search can still list a posting its API reports expired.
+    assert tuple(store.conn.execute("SELECT closed_at, liveness_checked_at FROM jobs").fetchone()) == (None, None)
 
 
 def test_candidates_use_latest_source_instant_across_offsets(tmp_path: Path) -> None:
@@ -122,26 +140,23 @@ def test_candidates_use_latest_source_instant_across_offsets(tmp_path: Path) -> 
     store.upsert(job(source="greenhouse"), "2026-10-01T23:30:00+02:00")
     store.upsert(job(source="lever"), "2026-10-01T18:00:00-05:00")
     store.commit()
-    assert store.liveness_candidates("2026-10-03T22:30:00+00:00", 40) == []
-    assert store.liveness_candidates("2026-10-03T23:00:00+00:00", 40) == []
-    [candidate] = store.liveness_candidates("2026-10-03T23:00:01+00:00", 40)
+    assert store.liveness_candidates("2026-10-03T22:30:00+00:00") == []
+    assert store.liveness_candidates("2026-10-03T23:00:00+00:00") == []
+    [candidate] = store.liveness_candidates("2026-10-03T23:00:01+00:00")
     assert {link.source for link in candidate.sources} == {"greenhouse", "lever"}
     assert all(link.url == "https://indeed/1" for link in candidate.sources)
 
 
-def test_candidates_oldest_first_and_capped(tmp_path: Path) -> None:
+def test_candidates_oldest_first(tmp_path: Path) -> None:
     store = Store(tmp_path / "t.db")
     for posting_id, seen in [("new", "2026-10-03"), ("middle", "2026-10-02"), ("old", "2026-10-01")]:
         store.upsert(job(source="workday", source_id=posting_id), f"{seen}T12:00:00+00:00")
     store.commit()
     now = "2026-10-05T12:00:00+00:00"
-    assert store.liveness_candidates(now, 0) == []
-    [old] = store.liveness_candidates(now, 1)
-    assert old.sources[0].source_id == "old"
-    assert [t.sources[0].source_id for t in store.liveness_candidates(now, 40)] == ["old", "middle"]
+    old, middle = store.liveness_candidates(now)
+    assert [old.sources[0].source_id, middle.sources[0].source_id] == ["old", "middle"]
     store.record_liveness(old.job_id, "unknown", now)
-    [middle] = store.liveness_candidates(now, 40)
-    assert middle.sources[0].source_id == "middle"
+    assert store.liveness_candidates(now) == [middle]
 
 
 def test_old_schema_migration_is_idempotent(tmp_path: Path) -> None:

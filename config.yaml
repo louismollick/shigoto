@@ -1,7 +1,7 @@
 # shigoto config. Secrets/paths come from env: GOOGLE_APPLICATION_CREDENTIALS, SHIGOTO_SPREADSHEET_ID, SHIGOTO_DB.
 
 interval_hours: 6
-liveness_max_per_run: 40
+liveness_max_per_run: 40  # per-posting closure checks per run; Indeed batch checks are free
 
 search_terms:
   - microbiology

@@ -77,6 +77,8 @@ UpsertResult = Literal["new", "changed", "seen"]
 FULL_LISTING_SOURCES = frozenset({
     "workday", "smartrecruiters", "greenhouse", "lever", "ashby", "successfactors", "gcjobs",
 })
+# Searches here are partial, so absence proves nothing, but each posting can be checked directly.
+DIRECT_CHECK_SOURCES = frozenset({"indeed", "linkedin", "jobbank"})
 CLOSED_AFTER = timedelta(days=2)
 
 @dataclass(frozen=True)
@@ -206,6 +208,8 @@ class Store:
             """UPDATE jobs SET title=:title, company=:company, location=:location, description=:description,
                salary=:salary, job_type=:job_type, city=:city, posted_date=coalesce(posted_date, :posted),
                content_hash=:hash, closed_at=CASE WHEN :seen THEN NULL ELSE closed_at END,
+               liveness_checked_at=CASE WHEN :seen AND closed_at IS NOT NULL THEN NULL
+                                        ELSE liveness_checked_at END,
                last_seen=CASE WHEN :seen THEN :now ELSE last_seen END,
                updated_at=CASE WHEN :changed THEN :now ELSE updated_at END
                WHERE job_id=:job_id""",
@@ -236,20 +240,25 @@ class Store:
         )
         self.conn.commit()
 
-    def liveness_candidates(self, now: str, limit: int) -> list[LivenessTarget]:
-        """Stale board-only jobs, oldest first, checked at most once per day."""
+    def liveness_candidates(self, now: str) -> list[LivenessTarget]:
+        """Open jobs whose every source can be checked, stalest first, checked at most once per day.
+
+        Full-listing sources must also be missing from their listings for CLOSED_AFTER;
+        a recent sighting there already proves the job is open.
+        """
         cutoff = (datetime.fromisoformat(now) - CLOSED_AFTER).isoformat()
         checked_cutoff = (datetime.fromisoformat(now) - timedelta(days=1)).isoformat()
-        placeholders = ",".join("?" for _ in FULL_LISTING_SOURCES)
+        full, checkable = sorted(FULL_LISTING_SOURCES), sorted(FULL_LISTING_SOURCES | DIRECT_CHECK_SOURCES)
         rows = self.conn.execute(
             f"""SELECT j.job_id FROM jobs j JOIN job_sources s ON s.job_id=j.job_id
                 WHERE j.closed_at IS NULL AND (j.liveness_checked_at IS NULL
                     OR julianday(j.liveness_checked_at) <= julianday(?))
                 GROUP BY j.job_id
-                HAVING min(s.source IN ({placeholders}))=1
-                    AND max(julianday(s.last_seen)) < julianday(?)
-                ORDER BY max(julianday(s.last_seen)), j.job_id LIMIT ?""",
-            (checked_cutoff, *sorted(FULL_LISTING_SOURCES), cutoff, max(0, limit)),
+                HAVING min(s.source IN ({",".join("?" * len(checkable))}))=1
+                    AND coalesce(max(CASE WHEN s.source IN ({",".join("?" * len(full))})
+                                     THEN julianday(s.last_seen) END), 0) < julianday(?)
+                ORDER BY max(julianday(s.last_seen)), j.job_id""",
+            (checked_cutoff, *checkable, *full, cutoff),
         ).fetchall()
         return [LivenessTarget(row["job_id"], [
             SourceLink(s["source"], s["source_id"], s["url"])
