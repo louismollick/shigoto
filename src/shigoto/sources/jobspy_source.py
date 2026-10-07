@@ -125,10 +125,10 @@ _DESCRIPTION_PAY = re.compile(
     r"\s*(?P<end_currency>CAD|USD)?",
     re.IGNORECASE,
 )
-# "Pay Rate:", "Salary", "hourly pay of", "annual salary is" directly before an amount.
+# "Pay Rate:", "Salary", "hourly pay of", "annual salary starts at" directly before an amount.
 _PAY_LABEL = re.compile(
     rf"\b(?:(?P<unit>{_UNIT})\s+)?(?:base\s+)?(?:pay|salary|compensation|wages?)(?:\s+(?:rate|range))?"
-    r"\s*(?::|\bof|\bis)?\s*$",
+    r"\s*(?::|\bof|\bis|\b(?:starts?|starting)\s+(?:at|from))?\s*$",
     re.IGNORECASE,
 )
 # Extras like "Afternoon Shift Premium $2.00/hour" in the same clause as the amount are not base pay.

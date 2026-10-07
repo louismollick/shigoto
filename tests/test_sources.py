@@ -52,6 +52,7 @@ def test_linkedin_combined_query() -> None:
     ("Afternoon Shift Premium $2.00/hour. Pay Rate: $23.25/hr", "23.25 CAD hourly"),
     ("Night shift differential: $1.50/hr", ""),
     ("The annual salary is $60,000.", "60,000 CAD yearly"),
+    ("Annual salary starts at $64k. Compensation is based on experience", "64,000 CAD yearly"),
     ("Competitive salary and health benefits", ""),
     ("Salary: $0/hr", ""),
     ("Salary: $30 - $20/hour", ""),
