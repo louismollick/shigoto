@@ -92,6 +92,7 @@ def test_rebuild_preserves_arbitrary_reviews_by_job_and_hides_old_rows(tmp_path:
         assert rebuild(store, ws, config_for(path)) == {"sheet_rows": 2, "sheet_hidden": 1, "reviews_backed_up": 4}
     assert "1 sheet jobs absent from SQLite" in caplog.text
     columns[-1] = "Column X"
+    late_review[5] = "Not Applied"
     assert ws.rows == [APP_COLUMNS + columns, job_row(early, 20000) + early_review, job_row(late, 20000) + late_review]
     assert ws.row_count == 3 and ws.col_count == 24
     assert store.reviewer_columns() == columns
@@ -100,6 +101,35 @@ def test_rebuild_preserves_arbitrary_reviews_by_job_and_hides_old_rows(tmp_path:
     assert store.conn.execute("SELECT ai_reviewed_at FROM jobs WHERE job_id=?", (early.job_id,)).fetchone()[0] == "2026-10-04"
     assert ws.writes == [("A1", ValueInputOption.raw, 1), ("A2:N3", ValueInputOption.raw, 2),
                          ("O2:X3", ValueInputOption.user_entered, 2)]
+
+
+def test_default_application_status_preserves_workflow_and_survives_sync(tmp_path: Path) -> None:
+    path = tmp_path / "t.db"
+    store = Store(path)
+    for source_id in ["applied", "skipped", "blank", "new"]:
+        store.upsert(posting(source_id), "t1")
+    store.commit()
+    applied, skipped, blank, new = store.visible_jobs()
+    # Status is found by its header even when reviewer columns are reordered.
+    columns = ["User Notes", "Application Status", "Applied At"]
+    ws = FakeWorksheet([APP_COLUMNS + columns,
+                        job_row(applied, 20000) + ["Keep me", "Applied", "2026-10-07"],
+                        job_row(skipped, 20000) + ["Skip notes", "Skip", ""],
+                        job_row(blank, 20000) + ["Unreviewed", "", ""]])
+    rebuild(store, ws, config_for(path))
+    assert [row[len(APP_COLUMNS):] for row in ws.rows[1:]] == [
+        ["Keep me", "Applied", "2026-10-07"], ["Skip notes", "Skip", ""],
+        ["Unreviewed", "Not Applied", ""], ["", "Not Applied", ""],
+    ]
+    rebuild(store, ws, config_for(path))
+    assert store.reviews()[new.job_id]["Application Status"] == "Not Applied"
+    assert store.reviews()[blank.job_id]["Application Status"] == "Not Applied"
+    # Undoing Applied remains a normal explicit status edit.
+    ws.rows[1][len(APP_COLUMNS) + 1] = "Not Applied"
+    rebuild(store, ws, config_for(path))
+    assert store.reviews()[applied.job_id] == {
+        "User Notes": "Keep me", "Application Status": "Not Applied", "Applied At": "2026-10-07",
+    }
 
 
 def test_user_cleared_value_and_changed_header_order(tmp_path: Path) -> None:

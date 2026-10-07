@@ -102,7 +102,10 @@ def sync(store: Store, ws: gspread.Worksheet, config: Config) -> dict[str, int]:
         )
         if columns:
             ws.update(
-                [[backed_up.get(job.job_id, {}).get(name, "") for name in columns] for job in chunk],
+                # Blank status means not applied; preserve every explicit workflow value.
+                [[backed_up.get(job.job_id, {}).get(name, "")
+                  or ("Not Applied" if name == "Application Status" else "")
+                  for name in columns] for job in chunk],
                 f"{rowcol_to_a1(start, len(APP_COLUMNS) + 1)}:{rowcol_to_a1(end, col_count)}",
                 value_input_option=ValueInputOption.user_entered,
             )

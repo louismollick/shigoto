@@ -47,6 +47,8 @@ ChatGPT should read all underlying rows, including filtered-out rows, and skip r
 
 After every sync, `shigoto.sheet_controls.configure_tracker` reapplies native controls; no Apps Script is needed. `Application Status` and `Application Stage` get dropdowns. `Applied At` and `Follow-up Date` get date formats and a date picker. If the tab has no basic filter, one is created that hides `Status = Closed` and `AI Decision = Reject` (blanks stay visible) and sorts by `AI Score`, highest first. An existing filter keeps its criteria and sort, even when both are empty; only its range grows to cover the rebuilt grid. Cell values are never written.
 
+When `Application Status` exists, sync writes `Not Applied` for jobs with a blank or missing status, including new jobs. Existing statuses and all other reviewer values are preserved.
+
 The `Closed` tab is read-only and built from two formulas. Widen both if reviewer columns go past X:
 
 - A1: `=ARRAYFORMULA('Jobs to Review'!A1:X1)`
