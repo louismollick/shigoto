@@ -87,15 +87,15 @@ The subprocess uses a temporary working directory, a dedicated `CODEX_HOME`, an 
 
 ### Subscription login
 
-Install the pinned CLI locally with `npm install -g @openai/codex@0.160.0`. Docker includes it already. Authenticate once as the same user that runs Shigoto, with file-backed credentials in the dedicated persistent directory:
+Install the pinned CLI locally with `npm install -g @openai/codex@0.160.0`. Docker includes it already. Authenticate once as the same user that runs Shigoto. The container's default file storage keeps credentials in its dedicated persistent directory:
 
 ```bash
 # Local development
-CODEX_HOME="$PWD/data/codex" codex -c 'cli_auth_credentials_store="file"' -c 'forced_login_method="chatgpt"' login --device-auth
+CODEX_HOME="$PWD/data/codex" codex login --device-auth
 
 # Existing Docker Compose service, with its /data volume mounted
-docker compose exec shigoto codex -c 'cli_auth_credentials_store="file"' -c 'forced_login_method="chatgpt"' login --device-auth
-docker compose exec shigoto codex -c 'cli_auth_credentials_store="file"' login status
+docker compose exec shigoto codex login --device-auth
+docker compose exec shigoto codex login status
 ```
 
 Complete the device login in your browser. Keep `/data` persistent across container updates, with access restricted to the service user. Do not mount your normal Codex home, plugins or configuration. This runner forces ChatGPT login and does not fall back to API billing. Subscription usage limits still apply. See the official [authentication](https://learn.chatgpt.com/docs/auth), [noninteractive execution](https://learn.chatgpt.com/docs/non-interactive-mode) and [usage](https://learn.chatgpt.com/docs/pricing) docs.
