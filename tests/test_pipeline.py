@@ -5,12 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from shigoto import main
+from shigoto import main, run_lock
 from shigoto.config import City, Config, SheetConfig
 from shigoto.db import Store
 from shigoto.models import Job, job_from_json
 from shigoto.normalize import CityMatcher
 from shigoto.pipeline import ingest, reprocess, run_once
+from shigoto.review import ReviewReport
 
 
 def config_for(path: Path) -> Config:
@@ -105,3 +106,76 @@ def test_reprocess_cli_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     monkeypatch.setattr(sys, "argv", ["shigoto", "reprocess"] + (["--no-sheet"] if no_sheet else []))
     main()
     assert calls == [not no_sheet]
+
+
+@pytest.mark.parametrize("sync_sheet", [False, True])
+def test_automatic_reviews_follow_successful_sync_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                      sync_sheet: bool) -> None:
+    config = config_for(tmp_path / "t.db")
+    config.review.enabled = True
+    order: list[str] = []
+    monkeypatch.setattr("shigoto.pipeline.build_sources", lambda *args: [])
+    monkeypatch.setattr("shigoto.pipeline.enrich_descriptions", lambda *args: {})
+    monkeypatch.setattr("shigoto.pipeline.check_liveness", lambda *args: {})
+
+    def sync(store: Store, config_arg: Config) -> dict[str, int]:
+        order.append("sync")
+        return {"sheet_rows": 5}
+
+    def review(config_arg: Config) -> ReviewReport:
+        order.append("review")
+        return ReviewReport(reviewed=1, maybe=1, pending=4)
+
+    monkeypatch.setattr("shigoto.pipeline.sync_to_sheet", sync)
+    monkeypatch.setattr("shigoto.pipeline.review", review)
+    stats = run_once(config, sync_sheet=sync_sheet)
+    assert order == (["sync", "review"] if sync_sheet else [])
+    if sync_sheet:
+        assert stats["ai_reviewed"] == stats["ai_maybe"] == 1 and stats["ai_pending"] == 4
+    else:
+        assert "ai_reviewed" not in stats
+
+
+def test_review_failure_preserves_completed_scrape_and_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = config_for(tmp_path / "t.db")
+    config.review.enabled = True
+    monkeypatch.setattr("shigoto.pipeline.build_sources", lambda *args: [])
+    monkeypatch.setattr("shigoto.pipeline.enrich_descriptions", lambda *args: {})
+    monkeypatch.setattr("shigoto.pipeline.check_liveness", lambda *args: {})
+    monkeypatch.setattr("shigoto.pipeline.sync_to_sheet", lambda *args: {"sheet_rows": 5})
+
+    def failed(config_arg: Config) -> ReviewReport:
+        raise RuntimeError("Missing review header")
+
+    monkeypatch.setattr("shigoto.pipeline.review", failed)
+    assert run_once(config) == {"sheet_rows": 5, "ai_errors": 1}
+    store = Store(config.db_path)
+    assert store.last_finished_run() is not None
+    store.close()
+
+
+def test_review_cli_dispatch_and_dry_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                       capsys: pytest.CaptureFixture[str]) -> None:
+    config = config_for(tmp_path / "t.db")
+
+    def review(config_arg: Config, *, dry_run: bool, job_id: str | None, limit: int | None) -> ReviewReport:
+        assert config_arg is config and dry_run and job_id == "one" and limit == 1
+        return ReviewReport(pending=2)
+
+    monkeypatch.setattr("shigoto.load_config", lambda path: config)
+    monkeypatch.setattr("shigoto.review", review)
+    monkeypatch.setattr(sys, "argv", ["shigoto", "review", "--dry-run", "--job", "one", "--limit", "1"])
+    main()
+    assert '"pending":2' in capsys.readouterr().out
+
+
+def test_cli_lock_prevents_manual_overlap_and_releases_after_error(tmp_path: Path) -> None:
+    config = config_for(tmp_path / "t.db")
+    with pytest.raises(ValueError):
+        with run_lock(config):
+            with pytest.raises(RuntimeError, match="already active"):
+                with run_lock(config):
+                    pytest.fail("Second run acquired the lock")
+            raise ValueError("interrupted")
+    with run_lock(config):
+        pass

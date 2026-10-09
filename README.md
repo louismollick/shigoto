@@ -1,9 +1,9 @@
 # shigoto
 
-Self-hosted job aggregator. Every 6 hours it searches job boards for the configured terms and cities, normalizes and deduplicates the results into SQLite, then rebuilds one Google Sheets tab for review (e.g. by ChatGPT). It contains no LLM logic.
+Self-hosted job aggregator. Every 6 hours it searches job boards, normalizes and deduplicates results into SQLite, syncs Google Sheets, then reviews up to 40 jobs with Codex CLI using a saved ChatGPT subscription login. Python handles selection, pay arithmetic, validation and writes. Codex judges job fit from the complete posting.
 
 ```
-source adapter -> canonical Job -> normalize -> cross-source dedupe -> SQLite -> Google Sheets
+source adapter -> canonical Job -> normalize -> cross-source dedupe -> SQLite -> Google Sheets -> Codex review -> five AI cells
 ```
 
 ## Sources
@@ -32,7 +32,7 @@ Indeed and Workday match search terms against descriptions, so "food safety" alo
 
 - `job_sources` maps every `(source, source_id)` to a `job_id`, so the same posting seen again is always the same job. It also stores the latest raw adapter record as JSON, before normalization, for `shigoto reprocess`.
 - A new posting from another source merges into an existing job when normalized company + title + city match (company suffixes like Inc/Ltd/Canada and punctuation are ignored).
-- A job's fields come from its first source; other sources only fill blanks (e.g. Indeed supplies the description for a LinkedIn job). `content_hash` covers only title and description. Only changes to those fields move `Updated At` forward, including description enrichment. Changes to salary, location, company or type update the stored fields without changing `Updated At`. Existing hashes are migrated without changing timestamps.
+- A job's fields come from its first source; other sources only fill blanks, such as Indeed supplying a LinkedIn description. `content_hash` covers title, description, company, city, location, salary and type. Changes to any of those fields move `Updated At` forward, including description enrichment. Existing hashes are migrated without changing historical timestamps.
 - A job becomes a closure candidate when every source can be checked and no full-listing source (Workday, SmartRecruiters, Greenhouse, Lever, Ashby, SuccessFactors or GC Jobs) has seen it in the last two days. Indeed, LinkedIn and Job Bank searches are partial, so their postings are checked directly whether or not they are still listed. Glassdoor cannot be checked, so jobs with a Glassdoor source stay open. Candidates are checked stalest first, at most once per day. Every source must confirm removal before the app sets `closed_at` and marks the job `Closed`:
   - Indeed: one GraphQL `jobData` request (the mobile API JobSpy uses) per 100 jobs reports `expired`. Viewjob pages are behind a bot challenge.
   - LinkedIn: the guest posting page returns 404/410 or shows its "No longer accepting applications" banner. Requests are at least 10s apart, and the first inconclusive answer, usually a rate limit, stops LinkedIn checks for the run.
@@ -46,9 +46,9 @@ The canonical tab is `Jobs to Review`. The configured `sheet.worksheet_id` ident
 
 Every column to the right of `Description` belongs to the reviewer. Names and order can change, and blank headers get a stable name such as `Column X`. At the start of every sync, the app reads the entire tab and commits all reviewer values, including cleared cells, to SQLite's `reviews` table. `meta` stores their header order. `AI Reviewed At` is also copied into `jobs.ai_reviewed_at` by header name; removing that header leaves the stored timestamp alone. Rows with IDs absent from SQLite have their reviews backed up, but are removed from the sheet with a warning.
 
-The app then rebuilds the tab from SQLite in `first_seen`, `job_id` order, pairing each job with its saved reviewer values. Excluded jobs stay hidden; confirmed closed jobs remain visible with `Status = Closed`. The grid shrinks to the written rows and columns. Writes use chunks of at most 200 jobs. App values are written raw so job text cannot become a formula; reviewer values use Google Sheets' user-entered parsing for numbers, dates and checkboxes. Backups contain formatted strings, not formulas or cell formatting. Avoid reviewer edits while a sync is running because the rebuild uses the snapshot taken at its start. If a rebuild fails partway through, the next sync restores the committed snapshot before accepting further reviewer changes; wait for a successful rebuild before editing again.
+The app then rebuilds the tab from SQLite in `first_seen`, `job_id` order, pairing each job with its saved reviewer values. Excluded jobs stay hidden; confirmed closed jobs remain visible with `Status = Closed`. The grid shrinks to the written rows and columns. Writes use chunks of at most 200 jobs. App and AI values are written raw so text cannot become a formula and AI timestamps retain their timezone offsets. AI scores remain numeric. Other reviewer values use Google Sheets' user-entered parsing for dates and checkboxes. Backups contain formatted strings, not formulas or cell formatting. Avoid reviewer edits while a sync is running because the rebuild uses the snapshot taken at its start. If a rebuild fails partway through, the next sync restores the committed snapshot before accepting further reviewer changes; wait for a successful rebuild before editing again.
 
-ChatGPT should read all underlying rows, including filtered-out rows, and skip rows with `Status = Closed`. An open row needs review when `AI Reviewed At` is blank or earlier than `Updated At`. Review writes must match Job IDs because users can sort the master table. The `Closed` tab is a formula view; rows remain in the master table and review backups stay keyed by Job ID.
+The review step reads all underlying rows, including filtered-out rows, and skips `Status = Closed`. It resolves columns by header and rows by Job ID. It writes only `AI Reviewed At`, `AI Score`, `AI Notes`, `AI Decision` and `AI Category`, one job per request with a readback check. It never changes filters, sort, headers, dropdowns or grid size, and never edits the `Applied` or `Closed` formula views. The scrape's existing sync and control setup still run before review.
 
 After every sync, `shigoto.sheet_controls.configure_tracker` reapplies native controls; no Apps Script is needed. `Application Status` and `Application Stage` get dropdowns. `Applied At` and `Follow-up Date` get date formats and a date picker. If the tab has no basic filter, one is created that hides `Status = Closed` and `AI Decision = Reject` (blanks stay visible) and sorts by `AI Score`, highest first. An existing filter keeps its criteria and sort, even when both are empty; only its range grows to cover the rebuilt grid. Cell values are never written.
 
@@ -69,6 +69,38 @@ The `Closed` tab is read-only and built from two formulas. Widen both if reviewe
 | `SHIGOTO_SPREADSHEET_ID` | required |
 | `SHIGOTO_DB` | `/data/shigoto.db` |
 | `SHIGOTO_CONFIG` | `/app/config.yaml` (mount your own to override) |
+| `CODEX_HOME` | `/data/codex` in Docker; `data/codex` locally |
+
+## Codex reviews
+
+`review.enabled: true` in the shipped config runs reviews after each successful scrape and Sheet sync. `run --no-sheet` and `reprocess` do not review. Manual `review` reads the existing master tab without rebuilding it. Missing required headers stop review rather than changing the sheet. Scheduled and manual commands share a nonblocking lock next to SQLite.
+
+Selection is deterministic: open jobs with a missing, invalid or stale AI timestamp, or no published result for the current posting and policy version, newest `Updated At` first, at most `review.max_per_run` jobs, capped at 40. Timestamps are compared with their offsets. The first Codex run re-reviews old ChatGPT scores once. This version check replaces the old fixed-date cutoff, so jobs are not repeatedly reselected before that date. Changing the prompt, model or reasoning setting queues a new review.
+
+Each fresh Codex invocation receives the candidate profile and scoring instructions in [review_prompt.md](src/shigoto/review_prompt.md), plus the full job data. Possible duplicates with the same company, title and city are included for comparison; Codex must confirm that their descriptions describe the same opening. Confirmed duplicates share the most complete posting's judgment, including across capped runs. Separate shifts and plants can receive different judgments.
+
+Codex returns schema-checked JSON containing the base score, duties and gaps, category, hard blockers, pay facts and duplicate IDs. Python applies the pay penalty and decision thresholds, caps hard blockers below 30, adds limited-description notes and the current Winnipeg timestamp, then persists the result in SQLite's `ai_results` table before publishing. Failed writes resume from the cached judgment without another model call. A rejected payload gets one retry with `Notes withheld: write blocked.`; transport and quota retries retain the original notes. Logs include each Job ID, exact errors, original notes and retry outcome. Reads are paced below the service-account quota.
+
+Login, usage-limit, process and timeout failures stop further model calls for that run. Already prepared results can still publish; remaining jobs wait for the next scrape. Review failure does not undo a completed scrape or sync. Normal reports contain reviewed and pending counts, decisions and failures; dry runs also include proposed values.
+
+The subprocess uses a temporary working directory, a dedicated `CODEX_HOME`, an ephemeral session and no inherited API keys, Google credentials or T3 configuration. Shell tools, agents, apps and web search are disabled. Posting text is treated as untrusted data. Codex has no Sheets tools; Shigoto uses its existing service-account connection to write results.
+
+### Subscription login
+
+Install the pinned CLI locally with `npm install -g @openai/codex@0.160.0`. Docker includes it already. Authenticate once as the same user that runs Shigoto, with file-backed credentials in the dedicated persistent directory:
+
+```bash
+# Local development
+CODEX_HOME="$PWD/data/codex" codex -c 'cli_auth_credentials_store="file"' -c 'forced_login_method="chatgpt"' login --device-auth
+
+# Existing Docker Compose service, with its /data volume mounted
+docker compose exec shigoto codex -c 'cli_auth_credentials_store="file"' -c 'forced_login_method="chatgpt"' login --device-auth
+docker compose exec shigoto codex -c 'cli_auth_credentials_store="file"' login status
+```
+
+Complete the device login in your browser. Keep `/data` persistent across container updates, with access restricted to the service user. Do not mount your normal Codex home, plugins or configuration. This runner forces ChatGPT login and does not fall back to API billing. Subscription usage limits still apply. See the official [authentication](https://learn.chatgpt.com/docs/auth), [noninteractive execution](https://learn.chatgpt.com/docs/non-interactive-mode) and [usage](https://learn.chatgpt.com/docs/pricing) docs.
+
+After enabling the service, disable the old ChatGPT scheduled review task so there is only one reviewer. A lost or revoked login needs another device login; pending jobs remain in the queue.
 
 ## Running
 
@@ -78,11 +110,16 @@ uv run shigoto run --no-sheet --only indeed,jobbank   # one run, selected source
 uv run shigoto run                                    # one full run
 uv run shigoto reprocess --no-sheet                    # replay stored raw jobs, re-apply filters locally
 uv run shigoto reprocess                               # replay and rebuild the sheet, without scraping
+uv run shigoto review --dry-run --limit 3               # inspect proposed reviews without saving or writing
+uv run shigoto review --job JOB_ID --limit 1            # publish one eligible job's review
+uv run shigoto review                                  # review the next batch without scraping or rebuilding
 uv run shigoto serve                                  # loop: next run is due 6h after the last one in the DB
 uv run mypy src tests && uv run pytest
 ```
 
 `reprocess` uses the current normalization and merge rules. It preserves job/source `first_seen` and `last_seen` and does not reopen closed jobs or run liveness checks. Older source rows without raw JSON remain unchanged, though all stored jobs still have their exclusions re-evaluated. Raw records accumulate for accepted jobs and known postings as sources are fetched after this version is deployed. Newly rejected postings are not stored.
+
+`review --job` still respects eligibility; it does not force a fresh score for an already current job. Dry runs may consume subscription usage but do not save judgments or change Sheet cells.
 
 CI type-checks, runs the tests, and publishes `ghcr.io/louismollick/shigoto:main` (amd64 + arm64). The VPS runs it from `louismollick-server`'s compose file, and Watchtower picks up new images.
 

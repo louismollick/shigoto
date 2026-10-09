@@ -11,7 +11,7 @@ from gspread.utils import ValueInputOption, a1_to_rowcol
 from shigoto.config import City, Config, SheetConfig
 from shigoto.db import Store
 from shigoto.models import Job
-from shigoto.sheets import APP_COLUMNS, CHUNK, HEADER, job_row, open_worksheet, sync
+from shigoto.sheets import APP_COLUMNS, CHUNK, HEADER, job_row, open_worksheet, reviewer_value, sync
 
 
 class FakeWorksheet:
@@ -29,7 +29,7 @@ class FakeWorksheet:
     def get_all_values(self) -> list[list[str]]:
         return [row.copy() for row in self.rows]
 
-    def update(self, values: list[list[str]], range_name: str, *, value_input_option: ValueInputOption) -> None:
+    def update(self, values: list[list[str | int]], range_name: str, *, value_input_option: ValueInputOption) -> None:
         self.writes.append((range_name, value_input_option, len(values)))
         row, col = a1_to_rowcol(range_name.split(":")[0])
         assert row + len(values) - 1 <= self.row_count
@@ -38,7 +38,7 @@ class FakeWorksheet:
             while len(self.rows) <= i:
                 self.rows.append([])
             self.rows[i].extend([""] * max(0, col - 1 + len(cells) - len(self.rows[i])))
-            self.rows[i][col - 1:col - 1 + len(cells)] = cells
+            self.rows[i][col - 1:col - 1 + len(cells)] = [str(cell) for cell in cells]
 
     def resize(self, rows: int, cols: int) -> None:
         self.resizes.append((rows, cols))
@@ -100,7 +100,7 @@ def test_rebuild_preserves_arbitrary_reviews_by_job_and_hides_old_rows(tmp_path:
     assert store.reviews()["unknown"]["AI Notes"] == "unknown notes"
     assert store.conn.execute("SELECT ai_reviewed_at FROM jobs WHERE job_id=?", (early.job_id,)).fetchone()[0] == "2026-10-04"
     assert ws.writes == [("A1", ValueInputOption.raw, 1), ("A2:N3", ValueInputOption.raw, 2),
-                         ("O2:X3", ValueInputOption.user_entered, 2)]
+                         ("O2:S3", ValueInputOption.raw, 2), ("T2:X3", ValueInputOption.user_entered, 2)]
 
 
 def test_default_application_status_preserves_workflow_and_survives_sync(tmp_path: Path) -> None:
@@ -159,7 +159,7 @@ def test_excluded_job_returns_with_review_after_config_relaxed(tmp_path: Path) -
     store.upsert(posting("1"), "t1")
     store.commit()
     [stored] = store.visible_jobs()
-    review = ["t2", "8", "Keep me"]
+    review = ["t2", "8", "Keep me", "", ""]
     ws = FakeWorksheet([HEADER, job_row(stored, 20000) + review])
     config.exclude_title_keywords = ["Technician"]
     assert rebuild(store, ws, config)["sheet_hidden"] == 1
@@ -184,7 +184,7 @@ def test_closed_job_remains_visible_with_review(tmp_path: Path) -> None:
     assert rebuild(store, ws, config_for(path))["sheet_rows"] == 1
     assert ws.rows[1][APP_COLUMNS.index("Status")] == "Closed"
     assert ws.rows[1][APP_COLUMNS.index("Updated At")] == "t1"
-    assert ws.rows[1][len(APP_COLUMNS):] == ["t2", "8", "Notes"]
+    assert ws.rows[1][len(APP_COLUMNS):] == ["t2", "8", "Notes", "", ""]
 
 
 def test_backup_committed_before_sheet_write_failure(tmp_path: Path) -> None:
@@ -195,7 +195,7 @@ def test_backup_committed_before_sheet_write_failure(tmp_path: Path) -> None:
     [stored] = store.visible_jobs()
 
     class FailedWorksheet(FakeWorksheet):
-        def update(self, values: list[list[str]], range_name: str, *, value_input_option: ValueInputOption) -> None:
+        def update(self, values: list[list[str | int]], range_name: str, *, value_input_option: ValueInputOption) -> None:
             with sqlite3.connect(path) as conn:
                 data = json.loads(conn.execute("SELECT data FROM reviews").fetchone()[0])
                 assert data == {"Notes": "Durable"}
@@ -219,7 +219,7 @@ def test_retry_uses_backup_after_ids_and_reviews_become_misaligned(tmp_path: Pat
     class InterruptedWorksheet(FakeWorksheet):
         fail = True
 
-        def update(self, values: list[list[str]], range_name: str, *, value_input_option: ValueInputOption) -> None:
+        def update(self, values: list[list[str | int]], range_name: str, *, value_input_option: ValueInputOption) -> None:
             if self.fail and value_input_option == ValueInputOption.user_entered:
                 raise RuntimeError("interrupted after app rows")
             super().update(values, range_name, value_input_option=value_input_option)
@@ -306,7 +306,7 @@ def test_chunked_writes_grow_grid_and_clear_leftovers(tmp_path: Path) -> None:
     store.commit()
     ws = FakeWorksheet([HEADER], row_count=1, col_count=len(HEADER))
     assert rebuild(store, ws, config_for(path))["sheet_rows"] == CHUNK * 2 + 1
-    assert [count for _, option, count in ws.writes if option == ValueInputOption.user_entered] == [CHUNK, CHUNK, 1]
+    assert [count for name, _, count in ws.writes if name.startswith("O")] == [CHUNK, CHUNK, 1]
     assert len(ws.rows) == CHUNK * 2 + 2 and ws.resizes[0] == (CHUNK * 2 + 2, len(HEADER))
     assert all(row[APP_COLUMNS.index("Description")].startswith("=") for row in ws.rows[1:])
     assert all(option == ValueInputOption.raw for name, option, _ in ws.writes if name.startswith("A"))
@@ -355,6 +355,45 @@ def test_new_worksheet_header_and_format(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert worksheet is cast(gspread.Worksheet, ws)
     assert ws.writes == []  # sync writes the header after backing up.
     assert ws.frozen_rows == 1 and ws.formatted_ranges == ["1:1", "A:Q"]
+
+
+def test_review_cannot_create_a_missing_worksheet(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class FakeSpreadsheet:
+        def worksheet(self, title: str) -> gspread.Worksheet:
+            raise gspread.WorksheetNotFound(title)
+
+        def add_worksheet(self, title: str, rows: int, cols: int) -> gspread.Worksheet:
+            pytest.fail("Review must never create a tab")
+
+    class FakeClient:
+        def open_by_key(self, key: str) -> FakeSpreadsheet:
+            return FakeSpreadsheet()
+
+    monkeypatch.setattr(gspread, "service_account", lambda filename: FakeClient())
+    with pytest.raises(gspread.WorksheetNotFound):
+        open_worksheet(tmp_path / "credentials.json", SheetConfig(spreadsheet_id="sheet-id"), create=False)
+
+
+def test_ai_values_survive_rebuild_as_literal_text_and_numeric_scores(tmp_path: Path) -> None:
+    path = tmp_path / "t.db"
+    store = Store(path)
+    store.upsert(posting("one"), "2026-10-08T10:00:00-05:00")
+    store.commit()
+    job = store.visible_jobs()[0]
+    ai = ["2026-10-08T11:00:00-05:00", "89.00", "=Literal notes", "Recommend", "Food QA"]
+
+    class NumericScoreWorksheet(FakeWorksheet):
+        def update(self, values: list[list[str | int]], range_name: str, *, value_input_option: ValueInputOption) -> None:
+            if range_name.startswith("O2:"):
+                assert value_input_option == ValueInputOption.raw and values[0][1] == 89
+                assert isinstance(values[0][1], int)
+            super().update(values, range_name, value_input_option=value_input_option)
+
+    sheet = NumericScoreWorksheet([HEADER, job_row(job, 20000) + ai])
+    rebuild(store, sheet, config_for(path))
+    rebuild(store, sheet, config_for(path))
+    assert sheet.rows[1][len(APP_COLUMNS):] == [ai[0], "89", *ai[2:]]
+    assert reviewer_value("AI Score", "NaN") == "NaN"
 
 
 @pytest.mark.parametrize("missing", [False, True])

@@ -192,12 +192,12 @@ def test_old_schema_migration_is_idempotent(tmp_path: Path) -> None:
     {"salary": "$60,000"}, {"company": "Acme Canada"}, {"location": "Toronto, Ontario"},
     {"job_type": "Full-time"},
 ])
-def test_other_field_changes_preserve_updated_at(tmp_path: Path, fields: dict[str, str]) -> None:
+def test_other_review_field_changes_bump_updated_at(tmp_path: Path, fields: dict[str, str]) -> None:
     store = Store(tmp_path / "t.db")
     store.upsert(job(), "t1")
-    assert store.upsert(job(**fields), "t2") == "seen"
+    assert store.upsert(job(**fields), "t2") == "changed"
     row = store.conn.execute("SELECT * FROM jobs").fetchone()
-    assert row["updated_at"] == "t1" and row["last_seen"] == "t2"
+    assert row["updated_at"] == "t2" and row["last_seen"] == "t2"
     for field, value in fields.items():
         assert row[field] == value
 

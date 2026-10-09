@@ -81,6 +81,18 @@ class SheetConfig(BaseModel):
     description_max_chars: int = 20000
 
 
+class ReviewConfig(BaseModel):
+    """Codex judgments use saved ChatGPT login, never an API key."""
+
+    enabled: bool = False
+    max_per_run: int = Field(default=40, ge=1, le=40)
+    model: str = "gpt-6.1-sol"
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "high"
+    timeout_seconds: int = Field(default=180, ge=1)
+    codex_bin: str = "codex"
+    codex_home: Path = Path("data/codex")
+
+
 class Config(BaseModel):
     search_terms: list[str]
     cities: list[City]
@@ -94,6 +106,7 @@ class Config(BaseModel):
     sheet: SheetConfig
     liveness_max_per_run: int = Field(default=40, ge=0)
     interval_hours: float = 6.0
+    review: ReviewConfig = Field(default_factory=ReviewConfig)
 
     # Filled from env, not yaml.
     db_path: Path = Path("data/shigoto.db")
@@ -105,6 +118,7 @@ def load_config(path: Path) -> Config:
     config = Config.model_validate(raw)
     config.db_path = Path(os.environ.get("SHIGOTO_DB", str(config.db_path)))
     config.sheet.spreadsheet_id = os.environ.get("SHIGOTO_SPREADSHEET_ID", config.sheet.spreadsheet_id)
+    config.review.codex_home = Path(os.environ.get("CODEX_HOME", str(config.review.codex_home)))
     creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     config.google_credentials = Path(creds) if creds else None
     return config

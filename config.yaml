@@ -3,6 +3,14 @@
 interval_hours: 6
 liveness_max_per_run: 40  # per-posting closure checks per run; Indeed batch checks are free
 
+# Runs after a successful Sheet sync. Authenticate Codex once in its persistent CODEX_HOME.
+review:
+  enabled: true
+  max_per_run: 40
+  model: gpt-6.1-sol
+  reasoning_effort: high
+  timeout_seconds: 180
+
 search_terms:
   - microbiology
   - laboratory technician

@@ -1,4 +1,4 @@
-"""One run: sources -> canonical Job -> normalize -> dedupe into SQLite -> enrich -> sheet sync."""
+"""One run: sources -> normalize -> SQLite -> enrich -> Sheet sync -> Codex review."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from shigoto.enrich import enrich_descriptions
 from shigoto.liveness import check_liveness, reset_robots
 from shigoto.models import job_from_json, job_json
 from shigoto.normalize import CityMatcher, normalize
+from shigoto.review import review
 from shigoto.sheet_controls import configure_tracker
 from shigoto.sheets import open_worksheet, sync
 from shigoto.sources import Source, build_sources
@@ -19,7 +20,7 @@ log = logging.getLogger(__name__)
 
 
 def run_once(config: Config, *, sync_sheet: bool = True, only: set[str] | None = None) -> dict[str, int]:
-    """Run every source (or just `only`), then rebuild the sheet."""
+    """Run selected sources, rebuild the sheet, then review if enabled."""
     store = Store(config.db_path)
     backfill = store.last_finished_run() is None
     run_id = store.start_run(now_iso())
@@ -34,6 +35,14 @@ def run_once(config: Config, *, sync_sheet: bool = True, only: set[str] | None =
         stats.update(check_liveness(store, config))
         if sync_sheet:
             stats.update(sync_to_sheet(store, config))
+            if config.review.enabled:
+                try:
+                    report = review(config)
+                    stats.update(report.stats())
+                    log.info("AI review: %s", report.model_dump_json())
+                except Exception:
+                    log.exception("AI review failed; scrape and Sheet sync remain complete")
+                    stats["ai_errors"] += 1
         else:
             stats["sheet_hidden"] = store.reevaluate_exclusions(config, now_iso())
     finally:

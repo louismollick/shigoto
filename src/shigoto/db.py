@@ -4,7 +4,7 @@
 we've seen to its job. Postings only merge across sources: two ids from the same source
 are always two jobs, even with identical company/title/city. A job's fields come from its primary (first) source; other
 sources only fill blanks, so the content hash doesn't flip-flop between sources.
-`content_hash` tracks title and description edits. Reviewer data is backed up before
+`content_hash` tracks edits to every field used for job-fit review. Reviewer data is backed up before
 each sheet rebuild; excluded jobs and their reviews remain here as history.
 """
 
@@ -71,6 +71,16 @@ CREATE TABLE IF NOT EXISTS runs (
     finished_at TEXT,
     stats TEXT
 );
+CREATE TABLE IF NOT EXISTS ai_results (
+    job_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    policy TEXT NOT NULL,
+    result TEXT NOT NULL,
+    fields TEXT NOT NULL,
+    written_at TEXT,
+    error TEXT,
+    PRIMARY KEY (job_id, fingerprint, policy)
+);
 """
 
 UpsertResult = Literal["new", "changed", "seen"]
@@ -127,9 +137,10 @@ def make_job_id(job: Job, distinct: bool = False) -> str:
     return hashlib.sha1(key.encode()).hexdigest()[:16]
 
 
-def content_hash(title: str, description: str) -> str:
-    """Only title and description edits require another review."""
-    return hashlib.sha1(json.dumps([title, description]).encode()).hexdigest()
+def content_hash(title: str, description: str, *, company: str = "", city: str = "",
+                 location: str = "", salary: str = "", job_type: str = "") -> str:
+    """Material changes to any review input advance Updated At."""
+    return hashlib.sha1(json.dumps([title, description, company, city, location, salary, job_type]).encode()).hexdigest()
 
 
 def now_iso() -> str:
@@ -149,13 +160,15 @@ class Store:
         source_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(job_sources)")}
         if "raw" not in source_columns:
             self.conn.execute("ALTER TABLE job_sources ADD COLUMN raw TEXT")
-        if self.conn.execute("SELECT 1 FROM meta WHERE key='content_hash_version'").fetchone() is None:
+        version = self.conn.execute("SELECT value FROM meta WHERE key='content_hash_version'").fetchone()
+        if version is None or version["value"] != "3":
             self.conn.executemany(
                 "UPDATE jobs SET content_hash=? WHERE job_id=?",
-                [(content_hash(row["title"], row["description"]), row["job_id"])
-                 for row in self.conn.execute("SELECT job_id, title, description FROM jobs")],
+                [(content_hash(row["title"], row["description"], company=row["company"], city=row["city"],
+                               location=row["location"], salary=row["salary"], job_type=row["job_type"]), row["job_id"])
+                 for row in self.conn.execute("SELECT * FROM jobs")],
             )
-            self.conn.execute("INSERT INTO meta (key, value) VALUES ('content_hash_version', '2')")
+            self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('content_hash_version', '3')")
         self.conn.commit()
 
     def close(self) -> None:
@@ -181,7 +194,8 @@ class Store:
         posted = job.posted_date.isoformat() if job.posted_date else None
         row = c.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
         if row is None:
-            h = content_hash(job.title, job.description)
+            h = content_hash(job.title, job.description, company=job.company, city=job.city,
+                             location=job.location, salary=job.salary, job_type=job.job_type)
             c.execute(
                 """INSERT INTO jobs (job_id, primary_source, title, company, city, location, description,
                    posted_date, salary, job_type, url, content_hash, first_seen, last_seen, updated_at)
@@ -202,7 +216,7 @@ class Store:
             "job_type": (job.job_type or row["job_type"]) if primary else row["job_type"] or job.job_type,
             "city": job.city if primary else row["city"],
         }
-        h = content_hash(merged["title"], merged["description"])
+        h = content_hash(**merged)
         changed = h != row["content_hash"]
         c.execute(
             """UPDATE jobs SET title=:title, company=:company, location=:location, description=:description,
@@ -232,7 +246,8 @@ class Store:
 
     def set_description(self, job_id: str, description: str, now: str) -> None:
         row = self.conn.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
-        h = content_hash(row["title"], description)
+        h = content_hash(row["title"], description, company=row["company"], city=row["city"],
+                         location=row["location"], salary=row["salary"], job_type=row["job_type"])
         self.conn.execute(
             """UPDATE jobs SET description=?, description_checked_at=?, content_hash=?,
                updated_at=CASE WHEN content_hash != ? THEN ? ELSE updated_at END WHERE job_id=?""",

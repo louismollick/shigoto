@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal, InvalidOperation
+from itertools import groupby
 from pathlib import Path
 
 import gspread
@@ -17,7 +19,7 @@ APP_COLUMNS = [
     "Job ID", "Title", "Company", "City", "Location", "Posted", "Salary", "Type", "URL", "Sources",
     "First Seen", "Updated At", "Status", "Description",
 ]
-AI_COLUMNS = ["AI Reviewed At", "AI Score", "AI Notes"]
+AI_COLUMNS = ["AI Reviewed At", "AI Score", "AI Notes", "AI Decision", "AI Category"]
 HEADER = APP_COLUMNS + AI_COLUMNS
 CHUNK = 200
 
@@ -32,7 +34,19 @@ def job_row(job: StoredJob, description_max: int) -> list[str]:
     ]
 
 
-def open_worksheet(credentials: Path, config: SheetConfig) -> gspread.Worksheet:
+def reviewer_value(name: str, value: str) -> str | int:
+    """Keep raw AI scores numeric for sorting; other AI values stay literal text."""
+    if name == "AI Score":
+        try:
+            number = Decimal(value)
+            if number.is_finite() and number == number.to_integral_value():
+                return int(number)
+        except InvalidOperation:
+            return value
+    return value or ("Not Applied" if name == "Application Status" else "")
+
+
+def open_worksheet(credentials: Path, config: SheetConfig, *, create: bool = True) -> gspread.Worksheet:
     client = gspread.service_account(filename=str(credentials))
     spreadsheet = client.open_by_key(config.spreadsheet_id)
     # An explicit ID survives renames and must never fall back to another tab.
@@ -41,6 +55,8 @@ def open_worksheet(credentials: Path, config: SheetConfig) -> gspread.Worksheet:
     try:
         return spreadsheet.worksheet(config.worksheet)
     except gspread.WorksheetNotFound:
+        if not create:
+            raise
         ws = spreadsheet.add_worksheet(config.worksheet, rows=1000, cols=len(HEADER))
         ws.freeze(rows=1)
         ws.format("1:1", {"textFormat": {"bold": True}})
@@ -101,14 +117,19 @@ def sync(store: Store, ws: gspread.Worksheet, config: Config) -> dict[str, int]:
             f"A{start}:{rowcol_to_a1(end, len(APP_COLUMNS))}", value_input_option=ValueInputOption.raw,
         )
         if columns:
-            ws.update(
-                # Blank status means not applied; preserve every explicit workflow value.
-                [[backed_up.get(job.job_id, {}).get(name, "")
-                  or ("Not Applied" if name == "Application Status" else "")
-                  for name in columns] for job in chunk],
-                f"{rowcol_to_a1(start, len(APP_COLUMNS) + 1)}:{rowcol_to_a1(end, col_count)}",
-                value_input_option=ValueInputOption.user_entered,
-            )
+            # AI strings must stay literal across rebuilds, including ISO offsets
+            # and notes beginning with formula characters. Workflow dates retain
+            # Sheets' user-entered parsing. Group adjacent columns to keep calls small.
+            for raw, indices in groupby(range(len(columns)), key=lambda n: columns[n] in AI_COLUMNS):
+                block = list(indices)
+                names = [columns[n] for n in block]
+                ws.update(
+                    [[reviewer_value(name, backed_up.get(job.job_id, {}).get(name, ""))
+                      for name in names] for job in chunk],
+                    f"{rowcol_to_a1(start, len(APP_COLUMNS) + block[0] + 1)}:"
+                    f"{rowcol_to_a1(end, len(APP_COLUMNS) + block[-1] + 1)}",
+                    value_input_option=ValueInputOption.raw if raw else ValueInputOption.user_entered,
+                )
     ws.resize(rows=row_count, cols=col_count)
     store.finish_sheet_rebuild()
     log.info("sheet rebuild: %d rows, %d hidden, %d reviews backed up", len(jobs), hidden, len(reviews))
