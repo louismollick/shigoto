@@ -8,7 +8,7 @@ review:
   enabled: true
   max_per_run: 40
   model: gpt-6.1-sol
-  reasoning_effort: high
+  reasoning_effort: low
   timeout_seconds: 180
 
 search_terms:

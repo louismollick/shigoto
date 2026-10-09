@@ -87,7 +87,7 @@ class ReviewConfig(BaseModel):
     enabled: bool = False
     max_per_run: int = Field(default=40, ge=1, le=40)
     model: str = "gpt-6.1-sol"
-    reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "high"
+    reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "low"
     timeout_seconds: int = Field(default=180, ge=1)
     codex_bin: str = "codex"
     codex_home: Path = Path("data/codex")

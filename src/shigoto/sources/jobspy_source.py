@@ -125,9 +125,10 @@ _DESCRIPTION_PAY = re.compile(
     r"\s*(?P<end_currency>CAD|USD)?",
     re.IGNORECASE,
 )
-# "Pay Rate:", "Salary", "hourly pay of", "annual salary starts at" directly before an amount.
+# Pay labels before an amount, including "hourly rate for the role is".
 _PAY_LABEL = re.compile(
-    rf"\b(?:(?P<unit>{_UNIT})\s+)?(?:base\s+)?(?:pay|salary|compensation|wages?)(?:\s+(?:rate|range))?"
+    rf"\b(?:(?P<unit>{_UNIT})\s+)?(?:base\s+)?(?P<label>pay|salary|compensation|wages?|rate)(?:\s+(?:rate|range))?"
+    r"(?:\s+for\s+(?:the|this)\s+(?:role|position|job))?"
     r"\s*(?::|\bof|\bis|\b(?:starts?|starting)\s+(?:at|from))?\s*$",
     re.IGNORECASE,
 )
@@ -156,6 +157,8 @@ def description_salary(description: str, default_currency: str = "CAD") -> str:
         unit = (match["unit"] or (label and label["unit"]) or "").lower()
         if not match["unit"] and not label:
             continue
+        if label and label["label"].lower() == "rate" and not unit:
+            continue  # An unspecified rate can describe an expense rather than pay.
         amounts = []
         for raw in (match["lo"], match["hi"]):
             if raw:
