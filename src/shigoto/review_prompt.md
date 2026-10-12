@@ -54,7 +54,11 @@ Report each applicable hard blocker with a short explanation of its evidence:
 - unrelated: duties are not laboratory, QA/QC or food-safety work at all.
 - too_far: the work site is more than about one hour's typical (non-rush-hour)
   drive from the centre of Calgary, Toronto, Vancouver or Ottawa. Judge from the
-  location text; a site you cannot place is not a blocker.
+  location text; a site you cannot place is not a blocker. Borderline places
+  already decided as in range: Abbotsford, Maple Ridge, Langley, Hamilton,
+  Ancaster, Stoney Creek, Oshawa, Whitby, Georgetown, Caledon, Stouffville,
+  Strathmore, High River, Carleton Place, Kemptville, Arnprior. Too far: Guelph,
+  Cambridge, Kitchener, Waterloo, St. Catharines, Niagara, Chilliwack, Renfrew.
 - off_hours_shift: the role's fixed schedule is overnight or starts before 6am.
   Rotating schedules, or a choice that includes day or afternoon shifts, are not
   a blocker and get no penalty. An unstated schedule is not a blocker.
