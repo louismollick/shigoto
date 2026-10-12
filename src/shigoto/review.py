@@ -36,14 +36,14 @@ from shigoto.sheets import AI_COLUMNS, open_worksheet
 log = logging.getLogger(__name__)
 INPUT_COLUMNS = ["Job ID", "Title", "Company", "Location", "Salary", "Type", "Description", "Updated At", "Status"]
 PROMPT = files("shigoto").joinpath("review_prompt.md").read_text()
-POLICY_VERSION = "1"
-PAY_TARGET = 55000
+POLICY_VERSION = "2"
+PAY_FLOOR = 55000
 WITHHELD = "Notes withheld: write blocked."
 Category = Literal["Food QA", "Microbiology Lab", "QC Lab", "Biotech/Pharma", "Environmental Lab",
                    "Regulatory/Food Safety", "R&D/Product Development", "Other"]
 Decision = Literal["Recommend", "Maybe", "Reject"]
 BlockerCode = Literal["french_essential", "missing_mandatory_cert", "software_qa", "management_senior",
-                      "essential_4plus_years", "phd_required", "unrelated"]
+                      "essential_4plus_years", "phd_required", "unrelated", "too_far", "off_hours_shift", "casual_role"]
 ReadResult = TypeVar("ReadResult")
 
 
@@ -62,6 +62,7 @@ class Pay(StrictModel):
     currency: str | None
     unit: Literal["hourly", "annual", "unknown"]
     full_time: bool
+    negotiable: bool
 
     @model_validator(mode="after")
     def valid_range(self) -> Self:
@@ -303,12 +304,10 @@ def finalize(result: Judgment, target: ReviewJob, canonical: ReviewJob) -> AIFie
     details: list[str] = []
     if not notes:
         raise ValueError("Codex notes are blank")
-    if annual_max is not None and annual_max < PAY_TARGET:
-        penalty = round(6 + 4 * min(1, (PAY_TARGET - annual_max) / 10000))
-        score = max(55 if score >= 55 else 0, score - penalty)
-        details.append(f"known pay is CAD ${annual_max:,.0f}/year, below the $55,000 preference")
-    elif annual_min is not None and annual_min < PAY_TARGET:
-        details.append("the pay range starts below the $55,000 preference")
+    if annual_max is not None and annual_max < PAY_FLOOR:
+        score = min(score, 74 if pay.negotiable else 54)
+        details.append(f"known pay is CAD ${annual_max:,.0f}/year, below the $55,000 floor"
+                       + (" but negotiable" if pay.negotiable else ""))
     if result.blockers:
         score = min(score, 29)
     decision: Decision = "Recommend" if score >= 75 else "Maybe" if score >= 55 else "Reject"
@@ -392,7 +391,7 @@ def review_rows(store: Store, ws: gspread.Worksheet, config: ReviewConfig, *, dr
     report.pending = len(eligible) + len(report.failures)
     selected = sorted((job for job in eligible if job_id is None or job.job_id == job_id),
                       key=lambda job: (job.updated_at, job.job_id), reverse=True)
-    selected = selected[:min(config.max_per_run, limit if limit is not None else config.max_per_run)]
+    selected = selected[:limit if limit is not None else config.max_per_run]
     if job_id is not None and not any(job.job_id == job_id for job in jobs):
         raise ValueError(f"Open Job ID not found: {job_id}")
     prepared: dict[str, AIFields] = {}
@@ -438,7 +437,7 @@ def review_rows(store: Store, ws: gspread.Worksheet, config: ReviewConfig, *, dr
                     save_result(store, target, fingerprints[target_id], policy, result, fields)
         except CodexUnavailable as error:
             report.failures.append(Failure(job_id=job.job_id, error=str(error)))
-            break  # Authentication/usage failures must not burn another 39 calls.
+            break  # Authentication/usage failures must not burn more calls.
         except (ValueError, ValidationError) as error:
             report.failures.append(Failure(job_id=job.job_id, error=str(error)))
     if dry_run:
@@ -506,8 +505,8 @@ def review(config: Config, *, dry_run: bool = False, job_id: str | None = None,
     """Manual review never creates, rebuilds, resizes or configures a worksheet."""
     if config.google_credentials is None or not config.sheet.spreadsheet_id:
         raise RuntimeError("GOOGLE_APPLICATION_CREDENTIALS and SHIGOTO_SPREADSHEET_ID must be set")
-    if limit is not None and not 1 <= limit <= 40:
-        raise ValueError("Review limit must be between 1 and 40")
+    if limit is not None and limit < 1:
+        raise ValueError("Review limit must be positive")
     ws = open_worksheet(config.google_credentials, config.sheet, create=False)
     if ws.title in {"Applied", "Closed"}:
         raise RuntimeError("Cannot review a formula-view worksheet")

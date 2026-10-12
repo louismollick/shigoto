@@ -85,7 +85,7 @@ class ReviewConfig(BaseModel):
     """Codex judgments use saved ChatGPT login, never an API key."""
 
     enabled: bool = False
-    max_per_run: int = Field(default=40, ge=1, le=40)
+    max_per_run: int = Field(default=40, ge=1)
     model: str = "gpt-6.1-sol"
     reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "low"
     timeout_seconds: int = Field(default=180, ge=1)
@@ -102,6 +102,7 @@ class Config(BaseModel):
     boards: Boards = Field(default_factory=Boards)
     title_keywords: list[str]  # a job's title must contain one (word-prefix match)
     exclude_title_keywords: list[str] = Field(default_factory=list)
+    exclude_companies: list[str] = Field(default_factory=list)
     descriptions: DescriptionFetch = Field(default_factory=DescriptionFetch)
     sheet: SheetConfig
     liveness_max_per_run: int = Field(default=40, ge=0)

@@ -59,7 +59,8 @@ def ingest(store: Store, source: Source, matcher: CityMatcher, config: Config) -
         for raw in source.fetch():
             stats[f"fetched_{source.name}"] += 1
             snapshot = job_json(raw)
-            job = normalize(raw, matcher, config.title_keywords, config.exclude_title_keywords)
+            job = normalize(raw, matcher, config.title_keywords, config.exclude_title_keywords,
+                            config.exclude_companies)
             if job is None:
                 stats["dropped"] += 1
                 known = store.conn.execute("SELECT 1 FROM job_sources WHERE source=? AND source_id=?",
@@ -96,7 +97,8 @@ def reprocess(config: Config, *, sync_sheet: bool = True) -> dict[str, int]:
         ).fetchall()
         for record in records:
             job = job_from_json(record["raw"])
-            included = normalize(job, matcher, config.title_keywords, config.exclude_title_keywords)
+            included = normalize(job, matcher, config.title_keywords, config.exclude_title_keywords,
+                                 config.exclude_companies)
             stats["reprocessed"] += 1
             if included is None:
                 stats["dropped"] += 1

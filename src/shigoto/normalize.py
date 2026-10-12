@@ -55,9 +55,9 @@ def title_matches(title: str, keywords: list[str]) -> bool:
 
 
 def normalize(job: Job, matcher: CityMatcher, title_keywords: list[str],
-              exclude_title_keywords: list[str]) -> Job | None:
+              exclude_title_keywords: list[str], exclude_companies: list[str]) -> Job | None:
     """Clean a job in place and return it, or None if it's outside our cities or its title
-    doesn't look relevant (no `title_keywords` prefix, or an excluded whole word)."""
+    doesn't look relevant, or its company is excluded."""
     job.title = clean(job.title)
     job.company = clean(job.company)
     job.location = clean(job.location)
@@ -70,7 +70,7 @@ def normalize(job: Job, matcher: CityMatcher, title_keywords: list[str],
         return None
     if not title_matches(job.title, title_keywords):
         return None
-    if title_matches(job.title, exclude_title_keywords):
+    if title_matches(job.title, exclude_title_keywords) or title_matches(job.company, exclude_companies):
         return None
     return job
 

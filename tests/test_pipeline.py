@@ -159,12 +159,12 @@ def test_review_cli_dispatch_and_dry_run(tmp_path: Path, monkeypatch: pytest.Mon
     config = config_for(tmp_path / "t.db")
 
     def review(config_arg: Config, *, dry_run: bool, job_id: str | None, limit: int | None) -> ReviewReport:
-        assert config_arg is config and dry_run and job_id == "one" and limit == 1
+        assert config_arg is config and dry_run and job_id == "one" and limit == 100
         return ReviewReport(pending=2)
 
     monkeypatch.setattr("shigoto.load_config", lambda path: config)
     monkeypatch.setattr("shigoto.review", review)
-    monkeypatch.setattr(sys, "argv", ["shigoto", "review", "--dry-run", "--job", "one", "--limit", "1"])
+    monkeypatch.setattr(sys, "argv", ["shigoto", "review", "--dry-run", "--job", "one", "--limit", "100"])
     main()
     assert '"pending":2' in capsys.readouterr().out
 
@@ -179,3 +179,28 @@ def test_cli_lock_prevents_manual_overlap_and_releases_after_error(tmp_path: Pat
             raise ValueError("interrupted")
     with run_lock(config):
         pass
+
+
+def test_ingest_drops_excluded_company(tmp_path: Path) -> None:
+    config = config_for(tmp_path / "t.db")
+    config.exclude_companies = ["Mérieux"]
+    store = Store(config.db_path)
+
+    class FakeSource:
+        name = "indeed"
+
+        def fetch(self) -> Iterator[Job]:
+            yield Job(source=self.name, source_id="1", url="https://example.com/1", title="QA Technician",
+                      company="MERIEUX NutriSciences", location="Toronto")
+
+    assert ingest(store, FakeSource(), CityMatcher(config.cities), config) == {"fetched_indeed": 1, "dropped": 1}
+    assert store.visible_jobs() == []
+    assert store.conn.execute("SELECT count(*) FROM job_sources").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("limit", ["0", "-1", "not-an-int"])
+def test_review_cli_rejects_nonpositive_or_invalid_limit(limit: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["shigoto", "review", "--limit", limit])
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code == 2

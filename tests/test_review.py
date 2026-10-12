@@ -43,7 +43,7 @@ def judgment(job_id: str = "one", **changes: object) -> Judgment:
     data: dict[str, object] = {"canonical_job_id": job_id, "duplicate_job_ids": [], "base_score": 89,
                               "blockers": [], "category": "Food QA",
                               "notes": "Food sampling and QC records fit her Saputo role.",
-                              "pay": Pay(minimum=60000, maximum=60000, currency="CAD", unit="annual", full_time=True)}
+                              "pay": Pay(minimum=60000, maximum=60000, currency="CAD", unit="annual", full_time=True, negotiable=False)}
     data.update(changes)
     return Judgment.model_validate(data)
 
@@ -158,34 +158,34 @@ def test_duplicate_job_ids_stop_without_writes(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(("score", "pay", "expected_score", "decision"), [
-    (89, 60000, 89, "Recommend"), (79, 50000, 71, "Maybe"), (57, 45000, 55, "Maybe"),
-    (50, 45000, 40, "Reject"), (75, 55000, 75, "Recommend"),
+    (89, 60000, 89, "Recommend"), (79, 50000, 54, "Reject"), (57, 45000, 54, "Reject"),
+    (50, 45000, 50, "Reject"), (75, 55000, 75, "Recommend"),
 ])
-def test_pay_arithmetic_and_maybe_floor(score: int, pay: int, expected_score: int, decision: str) -> None:
+def test_pay_floor(score: int, pay: int, expected_score: int, decision: str) -> None:
     _, [job] = read_jobs(Worksheet([record()]).rows, ReviewReport())
-    result = judgment(base_score=score, pay=Pay(minimum=pay, maximum=pay, currency="CAD", unit="annual", full_time=True))
+    result = judgment(base_score=score, pay=Pay(minimum=pay, maximum=pay, currency="CAD", unit="annual", full_time=True, negotiable=False))
     fields = finalize(result, job, job)
     assert (fields.score, fields.decision) == (expected_score, decision)
     assert ("below the $55,000" in fields.notes) == (pay < 55000)
 
 
 @pytest.mark.parametrize(("unit", "full_time", "currency", "amount", "expected"), [
-    ("hourly", True, "CAD", 23.25, 80), ("hourly", False, "CAD", 23.25, 89),
+    ("hourly", True, "CAD", 23.25, 54), ("hourly", False, "CAD", 23.25, 89),
     ("annual", True, "USD", 45000, 89), ("unknown", True, "CAD", 45000, 89),
 ])
 def test_hourly_only_annualized_when_full_time_and_cad(unit: str, full_time: bool, currency: str,
                                                      amount: float, expected: int) -> None:
     _, [job] = read_jobs(Worksheet([record()]).rows, ReviewReport())
-    pay = Pay.model_validate({"minimum": amount, "maximum": amount, "currency": currency, "unit": unit, "full_time": full_time})
+    pay = Pay.model_validate({"minimum": amount, "maximum": amount, "currency": currency, "unit": unit, "full_time": full_time, "negotiable": False})
     assert finalize(judgment(pay=pay), job, job).score == expected
 
 
 def test_crossing_range_and_unknown_pay_have_no_penalty() -> None:
     _, [job] = read_jobs(Worksheet([record()]).rows, ReviewReport())
-    crossing = Pay(minimum=50000, maximum=60000, currency="CAD", unit="annual", full_time=True)
+    crossing = Pay(minimum=50000, maximum=60000, currency="CAD", unit="annual", full_time=True, negotiable=False)
     fields = finalize(judgment(pay=crossing), job, job)
-    assert fields.score == 89 and "range starts below" in fields.notes
-    unknown = Pay(minimum=None, maximum=None, currency=None, unit="unknown", full_time=False)
+    assert fields.score == 89 and fields.notes == judgment().notes
+    unknown = Pay(minimum=None, maximum=None, currency=None, unit="unknown", full_time=False, negotiable=False)
     assert finalize(judgment(pay=unknown), job, job).score == 89
 
 
@@ -431,3 +431,47 @@ def test_strict_result_rejects_extra_fields_and_string_scores() -> None:
         Judgment.model_validate(data)
     with pytest.raises(ValidationError):
         judgment(unexpected="field")
+
+
+@pytest.mark.parametrize(("score", "expected", "decision"), [(89, 74, "Maybe"), (60, 60, "Maybe"), (50, 50, "Reject")])
+def test_negotiable_pay_caps_at_maybe(score: int, expected: int, decision: str) -> None:
+    _, [job] = read_jobs(Worksheet([record()]).rows, ReviewReport())
+    pay = Pay(minimum=45000, maximum=50000, currency="CAD", unit="annual", full_time=True, negotiable=True)
+    fields = finalize(judgment(base_score=score, pay=pay), job, job)
+    assert (fields.score, fields.decision) == (expected, decision)
+    assert fields.notes.endswith("Known pay is CAD $50,000/year, below the $55,000 floor but negotiable.")
+
+
+@pytest.mark.parametrize("code", ["too_far", "off_hours_shift", "casual_role"])
+@pytest.mark.parametrize("negotiable", [False, True])
+def test_new_blockers_cap_after_pay(code: str, negotiable: bool) -> None:
+    _, [job] = read_jobs(Worksheet([record()]).rows, ReviewReport())
+    blocker = Blocker.model_validate({"code": code, "evidence": "Explicit condition in the posting"})
+    pay = Pay(minimum=50000, maximum=50000, currency="CAD", unit="annual", full_time=True, negotiable=negotiable)
+    fields = finalize(judgment(blockers=[blocker], pay=pay), job, job)
+    assert fields.score == 29 and fields.decision == "Reject"
+
+
+@pytest.mark.parametrize("value", [None, "true", 1])
+def test_negotiable_is_required_and_strict(value: object) -> None:
+    data = judgment().pay.model_dump()
+    if value is None:
+        del data["negotiable"]
+    else:
+        data["negotiable"] = value
+    with pytest.raises(ValidationError):
+        Pay.model_validate(data)
+
+
+@pytest.mark.parametrize(("limit", "expected"), [(None, 1), (45, 45), (1, 1)])
+def test_explicit_limit_overrides_config(tmp_path: Path, limit: int | None, expected: int) -> None:
+    sheet = Worksheet([record(str(i)) for i in range(45)])
+    report = review_rows(Store(tmp_path / "t.db"), cast(gspread.Worksheet, sheet), ReviewConfig(max_per_run=1),
+                         limit=limit, judge=lambda job, group, config: judgment(job.job_id))
+    assert report.reviewed == expected and report.pending == 45 - expected
+
+
+def test_review_config_allows_batches_above_forty() -> None:
+    assert ReviewConfig(max_per_run=100).max_per_run == 100
+    with pytest.raises(ValidationError):
+        ReviewConfig(max_per_run=0)

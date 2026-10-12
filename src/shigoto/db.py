@@ -310,12 +310,13 @@ class Store:
         ]
 
     def reevaluate_exclusions(self, config: Config, now: str) -> int:
-        """Hide jobs outside current city/title filters, retaining their history and reviews."""
+        """Hide jobs outside current city/title/company filters, retaining their history and reviews."""
         cities = {city.name for city in config.cities}
         excluded = 0
-        for row in self.conn.execute("SELECT job_id, city, title FROM jobs").fetchall():
+        for row in self.conn.execute("SELECT job_id, city, title, company FROM jobs").fetchall():
             passes = (row["city"] in cities and title_matches(row["title"], config.title_keywords)
-                      and not title_matches(row["title"], config.exclude_title_keywords))
+                      and not title_matches(row["title"], config.exclude_title_keywords)
+                      and not title_matches(row["company"], config.exclude_companies))
             excluded += not passes
             self.conn.execute(
                 "UPDATE jobs SET excluded_at=CASE WHEN ? THEN NULL ELSE coalesce(excluded_at, ?) END WHERE job_id=?",

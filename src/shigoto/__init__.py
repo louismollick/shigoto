@@ -51,8 +51,10 @@ def main() -> None:
     parser.add_argument("--only", help="comma-separated source names, e.g. indeed,jobbank")
     parser.add_argument("--dry-run", action="store_true", help="review without saving results or writing Sheet cells")
     parser.add_argument("--job", help="review one Job ID")
-    parser.add_argument("--limit", type=int, choices=range(1, 41), metavar="1-40", help="maximum jobs to review")
+    parser.add_argument("--limit", type=int, metavar="N", help="positive job limit, overrides review.max_per_run")
     args = parser.parse_args()
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be positive")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     config = load_config(args.config)

@@ -8,12 +8,30 @@ scoring templates. Do not infer qualifications the candidate has not stated.
 
 ## Candidate
 
-Currently a QA lab technician at Saputo in Manitoba with about one year of hands-on
-QA/lab experience. Previously about two years of customer service in a food-testing
-environment, which is domain familiarity, not laboratory experience. BSc in
-Microbiology from McGill University. No other certifications, licenses, instruments
-or methods are known. Works in English or Mandarin only. Target locations are
-Calgary, Toronto/GTA, Vancouver/Lower Mainland and Ottawa.
+Quality control lab technician at Saputo (dairy) in Brandon, Manitoba since
+November 2025, about one year of hands-on lab/QA work. Her Saputo duties:
+- Microbiology: environmental swabbing, sample preparation and dilutions, plating,
+  and reading standard plate count, yeast and mould, coliform and Pseudomonas results.
+- Chemistry: CEM equipment for butterfat, moisture and total solids; FOSS FT for
+  fluid-product chemistry; pH meters.
+- Daily, weekly and monthly equipment calibration; operating and cleaning autoclaves.
+- Product QA checks, allergen testing, product holds and release from test results.
+- Investigating failed results, following SOPs, HACCP check documentation.
+- Shelf-life testing, product and packaging trials with the product scientist,
+  lab reports in Microsoft Office.
+
+Before that, 2022-2024 as a customer care representative at a food-testing lab
+company, using LIMS, Salesforce, Oracle CRM and JD Edwards. That is domain
+familiarity, not bench experience. BSc in Microbiology and Immunology (McGill,
+2022). WHMIS and company food-safety training. Holds a driver's licence and has a car.
+Fluent English and Mandarin. French: understands it well, speaks it poorly.
+No HPLC, GC, ICP, PCR or other instrument/method experience beyond the above, and
+no professional certifications (CSMLS, MLPAO, CQA, etc.).
+
+She will live within about one hour's drive of the centre of Calgary, Toronto,
+Vancouver or Ottawa. Closer to the city centre is better. She wants full-time
+work, permanent or a contract of at least 12 months, on day, afternoon or
+rotating shifts.
 
 ## Judgment
 
@@ -21,11 +39,12 @@ Read title, company, city/location, salary, type and the complete description.
 Judge actual day-to-day duties and stated requirements, not employer industry or
 title keywords. Separate essential requirements (required, must have, minimum)
 from preferred ones (asset, preferred, nice to have). A missing essential is a
-major gap; a missing preferred qualification is a small gap.
+major gap; a missing preferred qualification is a small gap. Credit her listed
+skills where the posting asks for them. A driver's licence requirement is met.
 
 Report each applicable hard blocker with a short explanation of its evidence:
-- french_essential: French required, bilingual imperative or French essential.
-  French as an asset is only a small negative.
+- french_essential: French required, bilingual imperative or spoken French
+  essential. French as an asset is neutral to slightly positive.
 - missing_mandatory_cert: an essential certification/license she lacks, such as
   CSMLS/CAMLPR. Preferred certifications do not qualify.
 - software_qa: software testing/QA.
@@ -33,20 +52,32 @@ Report each applicable hard blocker with a short explanation of its evidence:
 - essential_4plus_years: clearly essential experience of four or more years.
 - phd_required: a PhD is required.
 - unrelated: duties are not laboratory, QA/QC or food-safety work at all.
+- too_far: the work site is more than about one hour's typical (non-rush-hour)
+  drive from the centre of Calgary, Toronto, Vancouver or Ottawa. Judge from the
+  location text; a site you cannot place is not a blocker.
+- off_hours_shift: the role's fixed schedule is overnight or starts before 6am.
+  Rotating schedules, or a choice that includes day or afternoon shifts, are not
+  a blocker and get no penalty. An unstated schedule is not a blocker.
+- casual_role: casual, on-call or part-time work.
 
-Choose base_score before any pay adjustment:
-- 85-100: entry-level food, microbiology or QC lab testing, or food QA; 0-2 years;
-  target city; no essential requirement missing.
-- 75-84: the same kind of role with one meaningful gap: adjacent pharma/cosmetics/
-  environmental industry, 2-3 years requested, or an unfamiliar essential method
-  she could plausibly learn.
-- 55-74: plausible stretch in adjacent lab/quality work, several gaps, or a
-  practical issue such as a non-target location or temporary contract.
-- 30-54: lab-adjacent but mostly mismatched, core essential skills missing,
-  mostly non-lab duties, or 3-4 years essential.
+Choose base_score before any pay rule:
+- 85-100: food, dairy, microbiology or QC lab testing, or food QA; at most 2
+  years essential experience; no essential requirement missing.
+- 75-84: the same kind of role with one meaningful gap: environmental lab work,
+  3 years essential experience, an unfamiliar essential method she could
+  plausibly learn, or a contract of at least 6 but under 12 months.
+  Permanent roles and contracts of 12 months or more get no duration penalty.
+- 55-74: plausible stretch in adjacent lab/quality work or several gaps.
+  Contracts under 6 months and seasonal roles score no higher than 74.
+- 30-54: lab-adjacent but mostly mismatched, core essential skills missing or
+  mostly non-lab duties.
 - 0-29: a hard blocker or unrelated work.
-Within the band, use how closely the duties match Saputo QA and her degree.
-Distinct jobs should rarely receive identical scores. Do not invent differences.
+Pharma, cosmetics, supplement and clinical microbiology bench roles score about
+5 points below an otherwise identical food or dairy role, within the same band.
+Within the band, use how closely the duties match her Saputo work and degree,
+and how close the site is to the city centre. A posting that values Mandarin is a
+small plus. Distinct jobs should rarely receive identical scores. Do not invent
+differences.
 
 Choose category from the duties, exactly one of Food QA, Microbiology Lab, QC Lab,
 Biotech/Pharma, Environmental Lab, Regulatory/Food Safety, R&D/Product Development,
@@ -54,15 +85,19 @@ Other. Use Other for work that is not lab/quality work.
 
 ## Pay facts
 
-Use Salary first; only when blank extract pay from the description. "$64k" means
+Use Salary first for amounts; only when it has none, extract pay from the
+description. Always read the description for negotiability. "$64k" means
 64000. Extract base compensation, not shift premiums, bonuses or benefits. Report
 minimum and maximum of all known pay, currency and hourly/annual/unknown unit.
 For a single amount or "from" amount, report that amount as both minimum and
 maximum; do not invent the other end. If no pay is known, both are null. Do not
 guess CAD when the posting explicitly uses another currency. Report full_time
 only when the role appears full-time. Unknown hours or pay period stay uncertain.
-Python annualizes full-time hourly pay at 2080 hours, applies the $55000 preference
-and derives the final score/decision. Do not subtract a pay penalty yourself.
+Report negotiable only when the posting explicitly leaves pay open: "depending on
+experience", "commensurate with experience", "negotiable", or a "from"/"starting
+at" amount. A plain range or single figure is not negotiable.
+Python annualizes full-time hourly pay at 2080 hours, applies her $55000 pay
+floor and derives the final score/decision. Do not adjust base_score for pay.
 
 ## Possible duplicates
 

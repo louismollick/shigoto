@@ -310,3 +310,21 @@ def test_reprocess_updates_fields_even_when_new_normalization_excludes_job(tmp_p
     assert store.visible_jobs() == []
     row = store.conn.execute("SELECT title, last_seen FROM jobs").fetchone()
     assert row["title"] == "QA Manager" and row["last_seen"] == "t1"
+
+
+def test_company_exclusions_hide_and_restore_without_losing_reviews(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(company="MERIEUX NutriSciences"), "t1")
+    store.commit()
+    [saved] = store.visible_jobs()
+    store.backup_reviews(["Notes"], {saved.job_id: {"Notes": "Keep this"}}, "t1")
+    config = config_for(tmp_path / "t.db")
+    config.exclude_companies = ["Mérieux"]
+    assert store.reevaluate_exclusions(config, "t2") == 1
+    assert store.visible_jobs() == []
+    assert store.reevaluate_exclusions(config, "t3") == 1
+    assert store.conn.execute("SELECT excluded_at FROM jobs").fetchone()[0] == "t2"
+    config.exclude_companies = []
+    assert store.reevaluate_exclusions(config, "t4") == 0
+    assert store.visible_jobs()[0].updated_at == "t1"
+    assert store.reviews()[saved.job_id] == {"Notes": "Keep this"}

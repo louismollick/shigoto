@@ -45,12 +45,12 @@ def test_title_keywords_whole_word_or_prefix() -> None:
 
 def test_normalize_sets_city_and_drops() -> None:
     kw = ["QA", "food safety"]
-    j = normalize(job(source="workday", location="Burnaby, BC"), matcher, kw, [])
+    j = normalize(job(source="workday", location="Burnaby, BC"), matcher, kw, [], [])
     assert j is not None and j.city == "Vancouver"
-    assert normalize(job(location="Calgary, AB"), matcher, kw, []) is None
-    assert normalize(job(title="Software QA Engineer"), matcher, kw, ["software"]) is None
-    assert normalize(job(title="Line Cook"), matcher, kw, []) is None
-    preset = normalize(job(location="Guelph, ON", city="Toronto"), matcher, kw, [])
+    assert normalize(job(location="Calgary, AB"), matcher, kw, [], []) is None
+    assert normalize(job(title="Software QA Engineer"), matcher, kw, ["software"], []) is None
+    assert normalize(job(title="Line Cook"), matcher, kw, [], []) is None
+    preset = normalize(job(location="Guelph, ON", city="Toronto"), matcher, kw, [], [])
     assert preset is not None and preset.city == "Toronto"
 
 
@@ -59,3 +59,10 @@ def test_dedupe_key_ignores_company_suffix_and_punctuation() -> None:
     b = job(company="maple leaf foods", title="Quality Assurance Technician - Nights", city="Toronto",
             posted_date=date(2026, 1, 1))
     assert dedupe_key(a) == dedupe_key(b)
+
+
+def test_company_exclusion_uses_word_and_prefix_matching() -> None:
+    assert normalize(job(company="MERIEUX NutriSciences"), matcher, ["QA"], [], ["Mérieux"]) is None
+    assert normalize(job(company="MérieuxCanada"), matcher, ["QA"], [], ["merieux*"]) is None
+    assert normalize(job(company="MérieuxCanada"), matcher, ["QA"], [], ["Mérieux"]) is not None
+    assert normalize(job(company="Acme"), matcher, ["QA"], [], ["Mérieux"]) is not None
