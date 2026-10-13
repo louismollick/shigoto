@@ -14,7 +14,7 @@ source adapter -> canonical Job -> normalize -> cross-source dedupe -> SQLite ->
 | LinkedIn | JobSpy, three focused OR groups; one group per run across all cities, 72-hour window at cap 50, 90s between cities | Blocks around the 10th page per IP. Stops for the run on 429. Descriptions fetched for at most 25 new jobs per run, 10-15s apart |
 | ZipRecruiter | JobSpy, every term x city in Canada, cap 20 per search; JobSpy can paginate when records are skipped | 10s between searches; skips failed queries and stops on 429/999 |
 | Glassdoor | JobSpy, off by default | Blocks after ~30 requests; no descriptions |
-| Canada Job Bank | Recent Atom feed every run; paginated nationwide HTML search once a day | robots.txt `Crawl-delay: 5` honored for feed, search and details; HTML adds about 83 minutes of crawl delay for the current 28 terms |
+| Canada Job Bank | Recent Atom feed every run; newest-first nationwide HTML search once a day. The first pass reads every page; later passes stop each term at postings older than two days before the last complete pass | robots.txt `Crawl-delay: 5` honored for feed, search and details. Keyword search is fuzzy ("QA technician" matches ~5,000 jobs), so the first pass takes hours; daily passes take a few pages per term |
 | GC Jobs | Public HTML results, whole board filtered by title and city; native posters and external HTML details | At least 2s between requests; robots.txt restrictions and crawl delays honored |
 | SuccessFactors | RMK HTML tiles, per term in Canada | At least 1s between requests; robots.txt restrictions and crawl delays honored; details only for title/city matches |
 | Workday | Public CXS API, per term, filtered to Canada or target-city facets | 0.5s between requests, backoff on 429 |

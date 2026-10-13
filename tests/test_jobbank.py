@@ -20,12 +20,12 @@ def store(tmp_path: Path) -> Store:
     return Store(tmp_path / 'jobs.db')
 
 
-def search_page(ids: list[int], total: int = 60) -> str:
+def search_page(ids: list[int], total: int = 60, posted: str = 'October 05, 2026') -> str:
     return f'<span id="results-count">{total:,}</span>' + ''.join(
         f'''<article id="article-{i}"><a class="resultJobItem" href="/jobsearch/jobposting/{i};jsessionid=abc?source=searchresults">
         <h3><span class="flag">New Direct Apply</span><span class="noctitle">Laboratory Technician</span></h3>
         <li class="business">Acme &amp; Co</li><li class="location"><span class="wb-inv">Location</span>Toronto (ON)</li>
-        <li class="salary">Salary $28.00 hourly</li><li class="date">October 05, 2026</li></a></article>'''
+        <li class="salary">Salary $28.00 hourly</li><li class="date">{posted}</li></a></article>'''
         for i in ids
     )
 
@@ -175,3 +175,23 @@ def test_consecutive_page_failures_do_not_crawl_page_cap(monkeypatch: MonkeyPatc
     assert len(list(jb.JobBankSource(['bad', 'good'], store)._search())) == 1
     assert len(calls) == 3
     assert store.get_meta(jb.HTML_SEARCH_LAST_SUCCESS) == last_success
+
+
+def test_incremental_search_stops_at_first_page_older_than_since(monkeypatch: MonkeyPatch, store: Store) -> None:
+    calls: list[int] = []
+
+    def get_text(url: str) -> str:
+        page = int(parse_qs(urlparse(url).query)['page'][0])
+        calls.append(page)
+        return search_page([page], 100, 'October 10, 2026' if page == 1 else 'October 05, 2026')
+
+    monkeypatch.setattr(jb._session, 'get_text', get_text)
+    jobs = list(jb.JobBankSource(['quality'], store)._search(date(2026, 10, 8)))
+    assert [j.source_id for j in jobs] == ['1', '2'] and calls == [1, 2]
+    assert store.get_meta(jb.HTML_SEARCH_LAST_SUCCESS)
+
+
+def test_search_since_overlaps_last_complete_pass(store: Store) -> None:
+    assert jb.search_since(store) is None
+    store.set_meta(jb.HTML_SEARCH_LAST_SUCCESS, '2026-10-13T16:00:00+00:00')
+    assert jb.search_since(store) == date(2026, 10, 11)

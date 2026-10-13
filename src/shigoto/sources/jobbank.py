@@ -12,7 +12,7 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 from collections.abc import Iterator
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
@@ -51,7 +51,7 @@ class JobBankSource:
                 seen.add(job.source_id)
                 yield job
         if html_search_due(self.store):
-            for job in self._search():
+            for job in self._search(search_since(self.store)):
                 if job.source_id not in seen:
                     seen.add(job.source_id)
                     yield job
@@ -71,7 +71,8 @@ class JobBankSource:
                 if len(jobs) < PAGE_SIZE:
                     break
 
-    def _search(self) -> Iterator[Job]:
+    def _search(self, since: date | None = None) -> Iterator[Job]:
+        """Results are newest first, so with `since` each term stops at the first page of older postings."""
         started = datetime.now(timezone.utc)
         succeeded = True
         for term in self.terms:
@@ -102,11 +103,19 @@ class JobBankSource:
                     yield job
                 if page * SEARCH_PAGE_SIZE >= total:
                     break
+                if since and jobs and all(job.posted_date and job.posted_date < since for job in jobs):
+                    break
             else:
                 succeeded = False
                 log.warning("jobbank search %r hit page cap", term)
         if succeeded:
             self.store.set_meta(HTML_SEARCH_LAST_SUCCESS, started.isoformat())
+
+
+def search_since(store: Store) -> date | None:
+    """Two days before the last complete pass, so reposts and late dates overlap; None means a full pass."""
+    last_success = store.get_meta(HTML_SEARCH_LAST_SUCCESS)
+    return (datetime.fromisoformat(last_success) - timedelta(days=2)).date() if last_success else None
 
 
 def html_search_due(store: Store, now: datetime | None = None) -> bool:
