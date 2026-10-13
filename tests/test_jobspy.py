@@ -61,7 +61,7 @@ def test_recency_full_sweep_and_missed_runs(store: Store, monkeypatch: pytest.Mo
     assert calls[0]["hours_old"] is None
 
 
-@pytest.mark.parametrize("failure", ["crash", "429", "999", "500"])
+@pytest.mark.parametrize("failure", ["crash", "403", "429", "999", "500"])
 @pytest.mark.parametrize("raises", [False, True])
 def test_failed_pass_does_not_checkpoint_or_rotate(store: Store, monkeypatch: pytest.MonkeyPatch,
                                                   caplog: pytest.LogCaptureFixture, failure: str,
@@ -90,7 +90,7 @@ def test_failed_pass_does_not_checkpoint_or_rotate(store: Store, monkeypatch: py
     adapter.cities += [City(name="Ottawa", jobspy_location="Ottawa, ON"),
                        City(name="Vancouver", jobspy_location="Vancouver, BC")]
     jobs = list(adapter.fetch())
-    blocked = failure in {"429", "999"}
+    blocked = failure in {"403", "429", "999"}
     assert calls == ["Toronto, ON", "Ottawa, ON"] + ([] if blocked else ["Vancouver, BC"])
     assert [job.source_id for job in jobs] == ["li-1"] + ([] if blocked else ["li-3"])
     assert adapter.incomplete

@@ -39,6 +39,10 @@ def include_exact_salary(query: str) -> str:
 jobspy_indeed.job_search_query = include_exact_salary(jobspy_indeed.job_search_query)
 
 
+# 403 is a bot challenge (ZipRecruiter on datacenter IPs); 429/999 are rate limits. All block the run.
+_BLOCKED = re.compile(r"\b(403|429|999)\b")
+
+
 class _BlockDetector(logging.Handler):
     """Watches JobSpy's swallowed search errors, including rate-limit responses."""
 
@@ -50,7 +54,7 @@ class _BlockDetector(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         self.failed = True
         msg = record.getMessage()
-        if "429" in msg or "999" in msg:
+        if _BLOCKED.search(msg):
             self.blocked = True
 
 
@@ -109,7 +113,7 @@ class JobSpySource:
                             jobs = list(self._search(query, city, hours_old, results_wanted))
                         except Exception as error:
                             detector.failed = True
-                            detector.blocked |= "429" in str(error) or "999" in str(error)
+                            detector.blocked |= bool(_BLOCKED.search(str(error)))
                             log.warning("%s %r in %s failed: %s", self.name, query, city.name, error)
                         if detector.failed:
                             complete = False
