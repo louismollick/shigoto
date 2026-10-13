@@ -160,6 +160,8 @@ def test_duplicate_job_ids_stop_without_writes(tmp_path: Path) -> None:
 @pytest.mark.parametrize(("score", "pay", "expected_score", "decision"), [
     (89, 60000, 89, "Recommend"), (79, 50000, 54, "Reject"), (57, 45000, 54, "Reject"),
     (50, 45000, 50, "Reject"), (75, 55000, 75, "Recommend"),
+    # Within 5% of the floor counts as negotiable: Avalon Dairy's $26/hr is $54,080.
+    (96, 54080, 74, "Maybe"), (96, 52250, 74, "Maybe"), (96, 52249, 54, "Reject"),
 ])
 def test_pay_floor(score: int, pay: int, expected_score: int, decision: str) -> None:
     _, [job] = read_jobs(Worksheet([record()]).rows, ReviewReport())

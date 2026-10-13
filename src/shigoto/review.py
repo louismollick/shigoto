@@ -38,6 +38,7 @@ INPUT_COLUMNS = ["Job ID", "Title", "Company", "Location", "Salary", "Type", "De
 PROMPT = files("shigoto").joinpath("review_prompt.md").read_text()
 POLICY_VERSION = "2"
 PAY_FLOOR = 55000
+NEAR_FLOOR = 0.95 * PAY_FLOOR  # close enough to negotiate up, treated like negotiable pay
 WITHHELD = "Notes withheld: write blocked."
 Category = Literal["Food QA", "Microbiology Lab", "QC Lab", "Biotech/Pharma", "Environmental Lab",
                    "Regulatory/Food Safety", "R&D/Product Development", "Other"]
@@ -305,9 +306,10 @@ def finalize(result: Judgment, target: ReviewJob, canonical: ReviewJob) -> AIFie
     if not notes:
         raise ValueError("Codex notes are blank")
     if annual_max is not None and annual_max < PAY_FLOOR:
-        score = min(score, 74 if pay.negotiable else 54)
+        near = annual_max >= NEAR_FLOOR
+        score = min(score, 74 if pay.negotiable or near else 54)
         details.append(f"known pay is CAD ${annual_max:,.0f}/year, below the $55,000 floor"
-                       + (" but negotiable" if pay.negotiable else ""))
+                       + (" but negotiable" if pay.negotiable else " but within 5% of it" if near else ""))
     if result.blockers:
         score = min(score, 29)
     decision: Decision = "Recommend" if score >= 75 else "Maybe" if score >= 55 else "Reject"

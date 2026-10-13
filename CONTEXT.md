@@ -33,7 +33,7 @@ $55,000 CAD a year of base pay, with full-time hourly pay annualized at 2080 hou
 _Avoid_: Pay preference, pay target
 
 **Negotiable**:
-A posting whose pay below the Pay Floor is explicitly open, such as "depending on experience" or "commensurate with experience".
+Pay below the Pay Floor that can plausibly be negotiated up: the posting leaves it open ("depending on experience", "commensurate with experience"), or it tops out within 5% of the floor.
 _Avoid_: Flexible, DOE
 
 ### Review
