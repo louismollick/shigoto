@@ -18,6 +18,7 @@ from shigoto.config import SlugBoard
 from shigoto.http import PoliteSession, RateLimited, RobotsDisallowed, posting_liveness
 from shigoto.models import Job, Liveness
 from shigoto.normalize import title_matches
+from shigoto.sources.jobspy_source import format_salary
 from shigoto.text import clean, html_to_text, parse_date
 
 log = logging.getLogger(__name__)
@@ -155,6 +156,7 @@ class SmartRecruitersSource:
 
     def _detail(self, board: SlugBoard, posting: dict[str, Any], location: str) -> Job:
         detail = _session.get_json(f"{self.API}/{board.slug}/postings/{posting['id']}")
+        compensation = detail.get("compensation") or {}
         sections = (detail.get("jobAd") or {}).get("sections") or {}
         description = "\n\n".join(
             f"{s.get('title', '')}\n{html_to_text(s.get('text', ''))}" for s in sections.values() if s.get("text")
@@ -167,6 +169,10 @@ class SmartRecruitersSource:
             company=board.name,
             location=location,
             description=description,
+            salary=format_salary({
+                "min_amount": compensation.get("min"), "max_amount": compensation.get("max"),
+                "currency": compensation.get("currency"), "interval": clean(compensation.get("period")).lower(),
+            }),
             posted_date=parse_date(posting.get("releasedDate")),
             job_type=clean((posting.get("typeOfEmployment") or {}).get("label")),
         )

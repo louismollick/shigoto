@@ -16,12 +16,31 @@ from collections.abc import Iterator
 from typing import Any
 
 from jobspy import scrape_jobs
+import jobspy.indeed as jobspy_indeed
 
 from shigoto.config import City, JobSpySite
 from shigoto.models import Job
 from shigoto.text import clean, clean_description, parse_date
 
 log = logging.getLogger(__name__)
+
+
+def include_exact_salary(query: str) -> str:
+    """Work around JobSpy's Range-only Indeed query without extra detail requests.
+
+    Indeed also returns Exactly.value. Alias it to the bounds JobSpy already reads,
+    for both employer pay and estimates. Keep the braces escaped for query.format().
+    """
+    if "... on Exactly" in query:
+        return query
+    return query.replace(
+        "... on Range {{",
+        "... on Exactly {{ min: value max: value }}\n                    ... on Range {{",
+    )
+
+
+# JobSpy imports the query into its scraper module; changing constant.py alone has no effect.
+jobspy_indeed.job_search_query = include_exact_salary(jobspy_indeed.job_search_query)
 
 
 class _BlockDetector(logging.Handler):

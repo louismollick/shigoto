@@ -1,9 +1,15 @@
+import json as jsonlib
 import math
 
 import pytest
+import requests
+from jobspy import scrape_jobs
+from pytest import MonkeyPatch
 
+from shigoto.config import SlugBoard
+from shigoto.sources import ats
 from shigoto.sources.jobbank import parse_feed
-from shigoto.sources.jobspy_source import build_queries, description_salary, format_salary, row_to_job
+from shigoto.sources.jobspy_source import build_queries, description_salary, format_salary, include_exact_salary, row_to_job
 from shigoto.sources.workday import endpoint, location_filter
 
 FEED = """<?xml version="1.0" encoding="UTF-8"?>
@@ -101,6 +107,84 @@ def test_jobspy_description_pay_reaches_job() -> None:
     }, "Calgary")
     assert job is not None
     assert job.salary == "23.25 CAD hourly"
+
+
+def test_indeed_query_patch_is_idempotent() -> None:
+    query = "range {{ ... on Range {{ min max }} }}"
+    patched = include_exact_salary(query)
+    assert include_exact_salary(patched) == patched
+    assert "... on Exactly { min: value max: value }" in patched.format()
+    # Leave a future upstream query with native Exactly support alone.
+    upstream = "... on Exactly {{ value }}"
+    assert include_exact_salary(upstream) == upstream
+
+
+@pytest.mark.parametrize("estimated", [False, True])
+@pytest.mark.parametrize("bounds,expected", [
+    ({"min": 22.25, "max": 22.25}, "22.25 CAD hourly"),
+    ({"min": 20.5, "max": 25}, "20.5 - 25 CAD hourly"),
+    ({"min": 20.5, "max": None}, "20.5 CAD hourly"),
+])
+def test_indeed_compensation_reaches_job(monkeypatch: MonkeyPatch, estimated: bool,
+                                       bounds: dict[str, float | None], expected: str) -> None:
+    session = requests.Session()
+
+    def post(url: str, *, json: dict[str, str], **kwargs: object) -> requests.Response:
+        query = json["query"]
+        # Both employer pay and estimates must request Exactly as well as Range.
+        assert query.count("... on Exactly { min: value max: value }") == 2
+        assert query.count("... on Range {") == 2
+        salary = {"unitOfWork": "HOUR", "range": bounds}
+        compensation = {
+            "currencyCode": "CAD", "baseSalary": None if estimated else salary,
+            "estimated": {"currencyCode": "CAD", "baseSalary": salary} if estimated else None,
+        }
+        job = {
+            "key": "2032e128ccf2a724", "title": "QC Technician - Raw Product",
+            "description": {"html": "<p>Test raw product.</p>"}, "datePublished": 1791417600000,
+            "employer": None, "recruit": None, "attributes": [],
+            "location": {"city": "Toronto", "admin1Code": "ON", "countryCode": "CA",
+                         "formatted": {"long": "Toronto, ON"}},
+            "compensation": compensation,
+        }
+        response = requests.Response()
+        response.status_code = 200
+        response._content = jsonlib.dumps({"data": {"jobSearch": {
+            "results": [{"job": job}], "pageInfo": {"nextCursor": None},
+        }}}).encode()
+        return response
+
+    monkeypatch.setattr(session, "post", post)
+    monkeypatch.setattr("jobspy.indeed.create_session", lambda **kwargs: session)
+    df = scrape_jobs(site_name=["indeed"], search_term="QC Technician Ya Ya Foods",
+                     location="Toronto, ON", country_indeed="Canada", results_wanted=1, verbose=0)
+    [row] = df.to_dict("records")
+    job = row_to_job(row, "Toronto")
+    assert job is not None and job.salary == expected
+
+
+def test_jobspy_salary_without_interval_or_currency() -> None:
+    assert format_salary({"min_amount": 22.25}) == "22.25 CAD"
+
+
+@pytest.mark.parametrize("compensation,expected", [
+    ({"min": 20.5, "max": 20.5, "currency": "CAD", "period": "HOURLY"}, "20.5 CAD hourly"),
+    ({"min": 31, "max": 41, "currency": "CAD", "period": "HOURLY"}, "31 - 41 CAD hourly"),
+    ({"min": 55000, "currency": "CAD", "period": "YEARLY"}, "55,000 CAD yearly"),
+    ({"max": 60000, "currency": "USD", "period": "YEARLY"}, "60,000 USD yearly"),
+    ({"min": 25}, "25 CAD"),
+    ({}, ""), (None, ""),
+])
+def test_smartrecruiters_structured_salary(monkeypatch: MonkeyPatch,
+                                         compensation: dict[str, object] | None, expected: str) -> None:
+    monkeypatch.setattr(ats._session, "get_json", lambda url: {
+        "compensation": compensation,
+        "jobAd": {"sections": {"jobDescription": {"text": "<p>Test samples.</p>"}}},
+    })
+    source = ats.SmartRecruitersSource([], [], [], lambda location: True)
+    job = source._detail(SlugBoard(name="SGS", slug="SGS"), {"id": "1", "name": "Lab Technician"}, "Toronto")
+    assert job.salary == expected
+    assert "Test samples." in job.description
 
 
 def test_workday_endpoint_and_facets() -> None:
