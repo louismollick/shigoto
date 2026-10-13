@@ -47,8 +47,7 @@ def parse_results(markup: str) -> list[Job]:
             source="gcjobs", source_id=posting_id,
             url=f"{DETAIL_URL}?{urlencode({'poster': posting_id, 'toggleLanguage': 'en'})}",
             title=clean(link.get_text(" ", strip=True)), company=fields[1], location="; ".join(fields[2:]),
-            # A blank line separates fetched poster text from this search metadata.
-            description="\n".join(line for line in (fields[0], *metadata.splitlines()) if line.strip()),
+            description="\n\n".join(part for part in (fields[0], metadata) if part),
             salary=next((line for line in metadata.splitlines() if "$" in line), ""),
         ))
     return jobs
@@ -121,6 +120,7 @@ class GCJobsSource:
                     job.posted_date = parse_date(posted[1]) if posted else None
                 except Exception:
                     log.exception("gcjobs detail %s failed", job.source_id)
+                    job.description = ""
                 yield job
             following = next_page(markup, page)
             if following is None:

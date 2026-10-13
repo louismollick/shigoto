@@ -38,7 +38,7 @@ def test_later_zero_totals_and_more_than_five_pages(monkeypatch: MonkeyPatch) ->
     assert all(job.description == 'Test samples.' for job in jobs)
 
 
-def test_search_error_keeps_collected_jobs_and_next_term_with_summary_ids(monkeypatch: MonkeyPatch) -> None:
+def test_search_error_keeps_collected_jobs_and_next_term(monkeypatch: MonkeyPatch) -> None:
     calls: list[tuple[str, int]] = []
 
     def post(url: str, body: dict[str, object]) -> dict[str, object]:
@@ -51,14 +51,15 @@ def test_search_error_keeps_collected_jobs_and_next_term_with_summary_ids(monkey
             raise requests.ConnectionError('unavailable')
         return {'total': 40 if term == 'broken' else 1, 'jobPostings': [summary(1 if term == 'broken' else 2)]}
 
-    def fail_detail(url: str) -> object:
-        raise requests.ConnectionError('detail unavailable')
+    def get_detail(url: str) -> dict[str, object]:
+        return {'jobPostingInfo': {'jobReqId': url.rsplit('_', 1)[-1], 'title': 'Quality technician',
+                                   'location': 'Toronto', 'jobDescription': '<p>Test samples.</p>'}}
 
     monkeypatch.setattr(wd._session, 'post_json', post)
-    monkeypatch.setattr(wd._session, 'get_json', fail_detail)
+    monkeypatch.setattr(wd._session, 'get_json', get_detail)
     jobs = list(wd.WorkdaySource([BOARD], ['broken', 'quality'], ['quality'], lambda s: True).fetch())
     assert [j.source_id for j in jobs] == ['acme.wd5.myworkdayjobs.com:R1', 'acme.wd5.myworkdayjobs.com:R2']
-    assert all(j.title == 'Quality technician' and j.location == 'Toronto, ON' and not j.description for j in jobs)
+    assert all(j.location == 'Toronto' and j.description == 'Test samples.' for j in jobs)
     assert jobs[0].url == 'https://acme.wd5.myworkdayjobs.com/Careers/job/Toronto/Quality_R1'
     assert calls == [('broken', 0), ('broken', 20), ('quality', 0)]
 
@@ -78,3 +79,21 @@ def test_unknown_total_stops_on_repeated_ids(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(wd._session, 'get_json', lambda url: {'jobPostingInfo': {'jobReqId': 'R1', 'location': 'Toronto'}})
     assert len(list(wd.WorkdaySource([BOARD], ['quality'], ['quality'], lambda s: True).fetch())) == 1
     assert offsets == [0, 20]
+
+
+def test_detail_failure_skips_summary_and_keeps_next_posting(monkeypatch: MonkeyPatch) -> None:
+    def post(url: str, body: dict[str, object]) -> dict[str, object]:
+        if body['limit'] == 1:
+            return {'facets': FACETS}
+        bad = {**summary(1), 'locationsText': '2 Locations', 'bulletFields': ['Full time']}
+        return {'total': 2, 'jobPostings': [bad, summary(2)]}
+
+    def get(url: str) -> dict[str, object]:
+        if url.endswith('_R1'):
+            raise requests.ConnectionError('detail unavailable')
+        return {'jobPostingInfo': {'jobReqId': 'R2', 'location': 'Toronto'}}
+
+    monkeypatch.setattr(wd._session, 'post_json', post)
+    monkeypatch.setattr(wd._session, 'get_json', get)
+    jobs = list(wd.WorkdaySource([BOARD], ['quality'], ['quality'], lambda s: True).fetch())
+    assert [job.source_id for job in jobs] == ['acme.wd5.myworkdayjobs.com:R2']

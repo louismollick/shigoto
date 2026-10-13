@@ -31,7 +31,7 @@ def build_sources(config: Config, matcher: CityMatcher, store: Store) -> list[So
     terms, boards, keywords = config.search_terms, config.boards, config.title_keywords
     sources: list[Source] = [JobSpySource(s, terms, config.cities, store) for s in config.jobspy if s.enabled]
     if config.jobbank_enabled:
-        sources.append(JobBankSource(terms))
+        sources.append(JobBankSource(terms, store))
     if config.gcjobs_enabled:
         sources.append(GCJobsSource(keywords, is_target))
     sources += [

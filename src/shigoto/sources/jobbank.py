@@ -12,11 +12,12 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
 
+from shigoto.db import Store
 from shigoto.http import PoliteSession, posting_liveness
 from shigoto.models import Job, Liveness
 from shigoto.text import clean, html_to_text, parse_date
@@ -30,6 +31,7 @@ MAX_PAGES = 5
 CRAWL_DELAY = 5.0
 SEARCH_PAGE_SIZE = 25
 SEARCH_MAX_PAGES = 1000
+HTML_SEARCH_LAST_SUCCESS = "jobbank:html_search:last_success"
 ATOM = "{http://www.w3.org/2005/Atom}"
 
 _session = PoliteSession(min_interval=CRAWL_DELAY, respect_robots=True)
@@ -38,8 +40,9 @@ _session = PoliteSession(min_interval=CRAWL_DELAY, respect_robots=True)
 class JobBankSource:
     name = "jobbank"
 
-    def __init__(self, terms: list[str]) -> None:
+    def __init__(self, terms: list[str], store: Store) -> None:
         self.terms = terms
+        self.store = store
 
     def fetch(self) -> Iterator[Job]:
         seen: set[str] = set()
@@ -47,7 +50,7 @@ class JobBankSource:
             if job.source_id not in seen:
                 seen.add(job.source_id)
                 yield job
-        if html_search_due():
+        if html_search_due(self.store):
             for job in self._search():
                 if job.source_id not in seen:
                     seen.add(job.source_id)
@@ -69,6 +72,8 @@ class JobBankSource:
                     break
 
     def _search(self) -> Iterator[Job]:
+        started = datetime.now(timezone.utc)
+        succeeded = True
         for term in self.terms:
             seen: set[str] = set()
             total = 0
@@ -80,6 +85,7 @@ class JobBankSource:
                     jobs, total = parse_search(_session.get_text(url))
                 except Exception:
                     log.exception("jobbank search %r page %d failed", term, page)
+                    succeeded = False
                     failures += 1
                     if failures >= 2 or (total and page * SEARCH_PAGE_SIZE >= total):
                         break
@@ -87,6 +93,7 @@ class JobBankSource:
                 failures = 0
                 fresh = [job for job in jobs if job.source_id not in seen]
                 if jobs and not fresh:
+                    succeeded = False
                     log.warning("jobbank search %r page %d repeated, stopping", term, page)
                     break
                 log.info("jobbank search %r page %d: %d of %d entries", term, page, len(jobs), total)
@@ -96,12 +103,19 @@ class JobBankSource:
                 if page * SEARCH_PAGE_SIZE >= total:
                     break
             else:
+                succeeded = False
                 log.warning("jobbank search %r hit page cap", term)
+        if succeeded:
+            self.store.set_meta(HTML_SEARCH_LAST_SUCCESS, started.isoformat())
 
 
-def html_search_due(now: datetime | None = None) -> bool:
-    """One six-hour UTC slot for the daily HTML pass; the feed runs every time."""
-    return (now or datetime.now(timezone.utc)).hour < 6
+def html_search_due(store: Store, now: datetime | None = None) -> bool:
+    """Run the HTML pass once a day, retrying until every page succeeds."""
+    last_success = store.get_meta(HTML_SEARCH_LAST_SUCCESS)
+    if last_success is None:
+        return True
+    elapsed = (now or datetime.now(timezone.utc)) - datetime.fromisoformat(last_success)
+    return elapsed >= timedelta(hours=20)
 
 
 def parse_search(markup: str) -> tuple[list[Job], int]:

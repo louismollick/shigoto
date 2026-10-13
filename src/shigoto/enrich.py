@@ -1,7 +1,7 @@
 """Fill in missing descriptions one detail page at a time, capped per run.
 
 LinkedIn and Job Bank search results carry no description. GC Jobs details can fail
-and leave only search metadata. Retry missing descriptions, capped per source, and
+and leave an empty description. Retry missing descriptions, capped per source, and
 stop LinkedIn at the first sign of blocking so the next run starts fresh.
 """
 
@@ -20,7 +20,6 @@ from shigoto.http import RateLimited, RobotsDisallowed
 from shigoto.sources import gcjobs, jobbank, linkedin_detail
 
 log = logging.getLogger(__name__)
-GCJOBS_MAX_PER_RUN = 25
 
 
 def enrich_descriptions(store: Store, config: Config) -> dict[str, int]:
@@ -33,43 +32,8 @@ def enrich_descriptions(store: Store, config: Config) -> dict[str, int]:
         "described_jobbank": _enrich(
             store, "jobbank", d.jobbank_max_per_run, lambda t: jobbank.fetch_description(t.url), delay=0,
         ),
-        "described_gcjobs": _enrich_gcjobs(store),
+        "described_gcjobs": _enrich(store, "gcjobs", 25, lambda t: gcjobs.fetch_description(t.url), delay=0),
     }
-
-
-def _enrich_gcjobs(store: Store) -> int:
-    """Retry empty and search-metadata-only GC posters without changing the store API."""
-    rows = store.conn.execute(
-        """SELECT j.job_id, s.url, j.description FROM jobs j JOIN job_sources s ON s.job_id=j.job_id
-           WHERE s.source='gcjobs'
-             AND ((j.description='' AND j.description_checked_at IS NULL)
-                  OR (j.primary_source='gcjobs' AND j.description!=''
-                      AND instr(j.description, char(10) || char(10))=0
-                      AND (j.description_checked_at IS NULL
-                           OR julianday(s.last_seen) > julianday(j.description_checked_at))))
-           GROUP BY j.job_id ORDER BY j.first_seen DESC LIMIT ?""",
-        (GCJOBS_MAX_PER_RUN,),
-    ).fetchall()
-    done = 0
-    for row in rows:
-        try:
-            detail = gcjobs.fetch_description(row["url"])
-        except RateLimited:
-            log.warning("gcjobs rate-limited description fetches; stopping for this run")
-            break
-        except requests.HTTPError as exc:
-            if exc.response is None or exc.response.status_code not in (404, 410):
-                log.exception("gcjobs description fetch failed")
-                continue
-            detail = ""
-        except (requests.RequestException, RobotsDisallowed, ValueError):
-            log.exception("gcjobs description fetch failed")
-            continue
-        description = "\n\n".join(part for part in (row["description"], detail) if part)
-        store.set_description(row["job_id"], description, now_iso())
-        done += 1
-    log.info("gcjobs: fetched %d descriptions", done)
-    return done
 
 
 def _enrich(store: Store, source: str, limit: int, fetch: Callable[[DescriptionTarget], str], delay: float) -> int:
