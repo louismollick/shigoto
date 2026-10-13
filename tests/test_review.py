@@ -172,10 +172,11 @@ def test_pay_floor(score: int, pay: int, expected_score: int, decision: str) -> 
 
 
 @pytest.mark.parametrize(("unit", "full_time", "currency", "amount", "expected"), [
-    ("hourly", True, "CAD", 23.25, 54), ("hourly", False, "CAD", 23.25, 89),
+    ("hourly", True, "CAD", 23.25, 54), ("hourly", False, "CAD", 23.25, 54),
+    ("unknown", True, "CAD", 23.25, 54), ("hourly", True, "USD", 23.25, 89),
     ("annual", True, "USD", 45000, 89), ("unknown", True, "CAD", 45000, 89),
 ])
-def test_hourly_only_annualized_when_full_time_and_cad(unit: str, full_time: bool, currency: str,
+def test_cad_hourly_pay_always_annualized(unit: str, full_time: bool, currency: str,
                                                      amount: float, expected: int) -> None:
     _, [job] = read_jobs(Worksheet([record()]).rows, ReviewReport())
     pay = Pay.model_validate({"minimum": amount, "maximum": amount, "currency": currency, "unit": unit, "full_time": full_time, "negotiable": False})

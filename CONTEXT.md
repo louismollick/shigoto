@@ -29,7 +29,7 @@ Calgary, Toronto, Vancouver or Ottawa, including anywhere within about one hour'
 _Avoid_: Target city, location
 
 **Pay Floor**:
-$55,000 CAD a year of base pay, with full-time hourly pay annualized at 2080 hours. A job whose known pay tops out below it is rejected unless the pay is **Negotiable**.
+$55,000 CAD a year of base pay, with hourly pay annualized at 2080 hours. A job whose known pay tops out below it is rejected unless the pay is **Negotiable**.
 _Avoid_: Pay preference, pay target
 
 **Negotiable**:

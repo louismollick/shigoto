@@ -295,9 +295,13 @@ def finalize(result: Judgment, target: ReviewJob, canonical: ReviewJob) -> AIFie
     """Apply arithmetic and fixed decision rules, never keyword scoring."""
     pay = result.pay
     annual_min, annual_max = pay.minimum, pay.maximum
-    if pay.currency != "CAD" or pay.unit == "unknown" or (pay.unit == "hourly" and not pay.full_time):
+    # Hourly pay is annualized even when full_time is false: blank job types make
+    # the model report false, and part-time/casual roles are already hard blockers.
+    # An unknown unit under $200 can only be an hourly rate.
+    hourly = pay.unit == "hourly" or (pay.unit == "unknown" and annual_max is not None and annual_max < 200)
+    if pay.currency != "CAD" or (pay.unit == "unknown" and not hourly):
         annual_min = annual_max = None
-    elif pay.unit == "hourly" and annual_min is not None and annual_max is not None:
+    elif hourly and annual_min is not None and annual_max is not None:
         annual_min *= 2080
         annual_max *= 2080
     score = result.base_score
