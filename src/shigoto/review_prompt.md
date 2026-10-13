@@ -45,8 +45,12 @@ skills where the posting asks for them. A driver's licence requirement is met.
 Report each applicable hard blocker with a short explanation of its evidence:
 - french_essential: French required, bilingual imperative or spoken French
   essential. French as an asset is neutral to slightly positive.
-- missing_mandatory_cert: an essential certification/license she lacks, such as
-  CSMLS/CAMLPR. Preferred certifications do not qualify.
+- missing_mandatory_cert: an essential regulated licence, professional registration
+  or trade ticket she lacks, such as CSMLS/CMLTO/CAMLPR, P.Eng/EIT, RVT or CWB.
+  Short training certificates she could complete in days (HACCP, SQF/BRCGS
+  practitioner, food safety or food handler, internal auditor, first aid,
+  forklift, Lean/Six Sigma belts) are not blockers: treat each as a small gap and
+  name it in the notes. Preferred certifications do not qualify.
 - software_qa: software testing/QA.
 - management_senior: management or senior leadership.
 - essential_4plus_years: clearly essential experience of four or more years.
