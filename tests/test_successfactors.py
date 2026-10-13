@@ -1,9 +1,12 @@
 from datetime import date
 from urllib.parse import parse_qs, urlparse
 
+import pytest
+import requests
 from pytest import MonkeyPatch
 
 from shigoto.config import SuccessFactorsBoard
+from shigoto.models import Job
 from shigoto.sources import successfactors as sf
 
 BOARD = SuccessFactorsBoard(name="Acme", url="https://jobs.example.com/Brand/search/")
@@ -61,3 +64,34 @@ def test_rmk_ignores_repeated_page_and_fetches_only_survivors(monkeypatch: Monke
     assert parse_qs(urlparse(calls[1]).query)["startrow"] == ["2"]
 
 
+
+
+@pytest.mark.parametrize("failure", ["fetch", "parse"])
+def test_failed_term_keeps_prior_pages_and_remaining_terms(monkeypatch: MonkeyPatch, failure: str) -> None:
+    parse_tiles = sf.parse_tiles
+
+    def parse(markup: str, board: SuccessFactorsBoard) -> list[Job]:
+        if markup == "bad fragment":
+            raise ValueError("parse failed")
+        return parse_tiles(markup, board)
+
+    monkeypatch.setattr(sf, "parse_tiles", parse)
+
+    calls: list[tuple[str, str]] = []
+
+    def get_text(url: str) -> str:
+        if 'tile-search-results' not in url:
+            return '<div class="jobdescription">Test samples.</div>'
+        query = parse_qs(urlparse(url).query)
+        term, offset = query['q'][0], query['startrow'][0]
+        calls.append((term, offset))
+        if term == 'broken' and offset != '0':
+            if failure == 'parse':
+                return 'bad fragment'
+            raise requests.ConnectionError('unavailable')
+        return TILES if term == 'broken' else TILES.replace('job-id-101', 'job-id-201')
+
+    monkeypatch.setattr(sf._session, 'get_text', get_text)
+    jobs = list(sf.SuccessFactorsSource([BOARD], ['broken', 'quality'], ['quality'], lambda s: 'Toronto' in s).fetch())
+    assert {j.source_id for j in jobs} == {'https://jobs.example.com/Brand:101', 'https://jobs.example.com/Brand:201'}
+    assert calls == [('broken', '0'), ('broken', '2'), ('quality', '0'), ('quality', '2')]

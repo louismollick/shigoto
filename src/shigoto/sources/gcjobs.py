@@ -47,7 +47,8 @@ def parse_results(markup: str) -> list[Job]:
             source="gcjobs", source_id=posting_id,
             url=f"{DETAIL_URL}?{urlencode({'poster': posting_id, 'toggleLanguage': 'en'})}",
             title=clean(link.get_text(" ", strip=True)), company=fields[1], location="; ".join(fields[2:]),
-            description="\n".join([fields[0], metadata]).strip(),
+            # A blank line separates fetched poster text from this search metadata.
+            description="\n".join(line for line in (fields[0], *metadata.splitlines()) if line.strip()),
             salary=next((line for line in metadata.splitlines() if "$" in line), ""),
         ))
     return jobs
@@ -119,7 +120,6 @@ class GCJobsSource:
                     posted = re.search(r"Date posted:\s*(\d{4}-\d{2}-\d{2})", detail)
                     job.posted_date = parse_date(posted[1]) if posted else None
                 except Exception:
-                    job.description = ""  # Preserve an existing description when detail retrieval fails.
                     log.exception("gcjobs detail %s failed", job.source_id)
                 yield job
             following = next_page(markup, page)
@@ -127,6 +127,16 @@ class GCJobsSource:
                 return
             page = following
         log.warning("gcjobs hit page cap")
+
+
+def fetch_description(url: str) -> str:
+    """Retry a native poster or its external HTML posting during enrichment."""
+    description, external = parse_detail(_session.get_text(url))
+    if external:
+        description, _ = parse_detail(_session.get_text(external))
+    if not description:
+        raise ValueError("GC Jobs detail has no posting text")
+    return f"External posting: {external}\n\n{description}" if external else description
 
 
 def check_liveness(url: str, source_id: str) -> Liveness:

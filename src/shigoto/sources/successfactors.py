@@ -122,8 +122,12 @@ class SuccessFactorsSource:
             offset = 0
             seen: set[str] = set()
             for page in range(MAX_PAGES):
-                markup = _session.get_text(f"{base}/tile-search-results/?{urlencode({'q': term, 'locationsearch': 'Canada', 'startrow': offset})}")
-                rows = parse_tiles(markup, board)
+                try:
+                    markup = _session.get_text(f"{base}/tile-search-results/?{urlencode({'q': term, 'locationsearch': 'Canada', 'startrow': offset})}")
+                    rows = parse_tiles(markup, board)
+                except Exception:
+                    log.exception("successfactors %s %r page %d failed", board.name, term, page + 1)
+                    break
                 fresh = [j for j in rows if j.source_id not in seen]
                 if not fresh:
                     break

@@ -13,7 +13,7 @@ source adapter -> canonical Job -> normalize -> cross-source dedupe -> SQLite ->
 | Indeed | [JobSpy](https://github.com/speedyapply/JobSpy), every term x city | JobSpy: effectively unlimited |
 | LinkedIn | JobSpy, all terms OR'd into one query per city, 90s between cities | Blocks around the 10th page per IP, so ~5-15 page requests per run. Stops for the run on 429. Descriptions fetched for at most 25 new jobs per run, 10-15s apart |
 | Glassdoor | JobSpy, off by default | Blocks after ~30 requests; no descriptions |
-| Canada Job Bank | Public Atom feed (ported from [Career Ops](https://github.com/career-ops-hq/career-ops)) | robots.txt `Crawl-delay: 5` honored for feed and detail pages |
+| Canada Job Bank | Recent Atom feed every run; paginated nationwide HTML search during 00:00–06:00 UTC | robots.txt `Crawl-delay: 5` honored for feed, search and details; HTML adds about 83 minutes of crawl delay for the current 28 terms |
 | GC Jobs | Public HTML results, whole board filtered by title and city; native posters and external HTML details | At least 2s between requests; robots.txt restrictions and crawl delays honored |
 | SuccessFactors | RMK HTML tiles, per term in Canada | At least 1s between requests; robots.txt restrictions and crawl delays honored; details only for title/city matches |
 | Workday | Public CXS API, per term, filtered to Canada or target-city facets | 0.5s between requests, backoff on 429 |
@@ -22,7 +22,7 @@ source adapter -> canonical Job -> normalize -> cross-source dedupe -> SQLite ->
 
 Employer boards live in `config.yaml` (`boards:`). Existing boards were verified on 2026-10-06 to have Canadian postings. SuccessFactors includes Bureau Veritas, Cargill, Nestlé Canada and Bunge; Lactalis Canada was verified on 2026-10-12. Ingredion and Unilever use Workday. Some employer career sites still lack a verified adapter route, including Intertek, Charles River and Maple Leaf Foods. Gay Lea Foods uses Dayforce and Danone Canada uses iCIMS, which have no adapter here. Their postings may also appear through Indeed and LinkedIn.
 
-GC Jobs is controlled by `gcjobs_enabled`. It lists current public postings without login, using the same second-part HTML request as the site's JavaScript. It preserves the full location text and language requirements. Closing dates stay in the description, not `posted_date`. Listings that only say "Various Locations" cannot pass the city filter; failed detail fetches yield an empty description so an existing complete description is preserved. Nutrien was removed because its CSB API is disallowed by robots.txt.
+GC Jobs is controlled by `gcjobs_enabled`. It lists current public postings without login, using the same second-part HTML request as the site's JavaScript. It preserves the full location text and language requirements. Closing dates stay in the description, not `posted_date`. Listings that only say "Various Locations" cannot pass the city filter; failed detail fetches retain search metadata. Missing details are retried during enrichment, at most 25 postings per run. Nutrien was removed because its CSB API is disallowed by robots.txt.
 
 ## Relevance filter
 

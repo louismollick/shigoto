@@ -50,39 +50,49 @@ class BoardSource:
 
 def greenhouse_board(board: SlugBoard) -> list[Job]:
     data = _session.get_json(f"https://boards-api.greenhouse.io/v1/boards/{board.slug}/jobs?content=true")
-    return [
-        Job(
-            source="greenhouse",
-            source_id=f"{board.slug}:{j['id']}",
-            url=j.get("absolute_url") or "",
-            title=clean(j.get("title")),
-            company=board.name,
-            location=clean((j.get("location") or {}).get("name")),
-            description=html_to_text(j.get("content") or ""),
-            posted_date=parse_date(j.get("first_published") or j.get("updated_at")),
-        )
-        for j in data.get("jobs", [])
-    ]
+    jobs = []
+    for j in data.get("jobs", []):
+        try:
+            if not j["id"]:
+                raise ValueError("missing posting ID")
+            jobs.append(Job(
+                source="greenhouse",
+                source_id=f"{board.slug}:{j['id']}",
+                url=j.get("absolute_url") or "",
+                title=clean(j.get("title")),
+                company=board.name,
+                location=clean((j.get("location") or {}).get("name")),
+                description=html_to_text(j.get("content") or ""),
+                posted_date=parse_date(j.get("first_published") or j.get("updated_at")),
+            ))
+        except Exception:
+            log.exception("greenhouse %s malformed posting, skipping", board.slug)
+    return jobs
 
 
 def lever_board(board: SlugBoard) -> list[Job]:
     data: list[dict[str, Any]] = _session.get_json(f"https://api.lever.co/v0/postings/{board.slug}?mode=json")
     jobs = []
     for j in data:
-        cats = j.get("categories") or {}
-        locations = cats.get("allLocations") or [cats.get("location") or ""]
-        lists = "\n\n".join(f"{x.get('text', '')}\n{html_to_text(x.get('content', ''))}" for x in j.get("lists", []))
-        jobs.append(Job(
-            source="lever",
-            source_id=f"{board.slug}:{j['id']}",
-            url=j.get("hostedUrl") or "",
-            title=clean(j.get("text")),
-            company=board.name,
-            location="; ".join(clean(loc) for loc in locations if loc),
-            description="\n\n".join(p for p in (j.get("descriptionPlain"), lists, j.get("additionalPlain")) if p),
-            posted_date=parse_date(j.get("createdAt")),
-            job_type=clean(cats.get("commitment")),
-        ))
+        try:
+            if not j["id"]:
+                raise ValueError("missing posting ID")
+            cats = j.get("categories") or {}
+            locations = cats.get("allLocations") or [cats.get("location") or ""]
+            lists = "\n\n".join(f"{x.get('text', '')}\n{html_to_text(x.get('content', ''))}" for x in j.get("lists", []))
+            jobs.append(Job(
+                source="lever",
+                source_id=f"{board.slug}:{j['id']}",
+                url=j.get("hostedUrl") or "",
+                title=clean(j.get("text")),
+                company=board.name,
+                location="; ".join(clean(loc) for loc in locations if loc),
+                description="\n\n".join(p for p in (j.get("descriptionPlain"), lists, j.get("additionalPlain")) if p),
+                posted_date=parse_date(j.get("createdAt")),
+                job_type=clean(cats.get("commitment")),
+            ))
+        except Exception:
+            log.exception("lever %s malformed posting, skipping", board.slug)
     return jobs
 
 
@@ -90,20 +100,25 @@ def ashby_board(board: SlugBoard) -> list[Job]:
     data = _session.get_json(f"https://api.ashbyhq.com/posting-api/job-board/{board.slug}")
     jobs = []
     for j in data.get("jobs", []):
-        if j.get("isListed") is False:
-            continue
-        locations = [j.get("location") or ""] + [s.get("location", "") for s in j.get("secondaryLocations") or []]
-        jobs.append(Job(
-            source="ashby",
-            source_id=f"{board.slug}:{j['id']}",
-            url=j.get("jobUrl") or "",
-            title=clean(j.get("title")),
-            company=board.name,
-            location="; ".join(clean(loc) for loc in locations if loc),
-            description=j.get("descriptionPlain") or "",
-            posted_date=parse_date(j.get("publishedAt")),
-            job_type=clean(j.get("employmentType")),
-        ))
+        try:
+            if not j["id"]:
+                raise ValueError("missing posting ID")
+            if j.get("isListed") is False:
+                continue
+            locations = [j.get("location") or ""] + [s.get("location", "") for s in j.get("secondaryLocations") or []]
+            jobs.append(Job(
+                source="ashby",
+                source_id=f"{board.slug}:{j['id']}",
+                url=j.get("jobUrl") or "",
+                title=clean(j.get("title")),
+                company=board.name,
+                location="; ".join(clean(loc) for loc in locations if loc),
+                description=j.get("descriptionPlain") or "",
+                posted_date=parse_date(j.get("publishedAt")),
+                job_type=clean(j.get("employmentType")),
+            ))
+        except Exception:
+            log.exception("ashby %s malformed posting, skipping", board.slug)
     return jobs
 
 
@@ -132,11 +147,17 @@ class SmartRecruitersSource:
                     log.exception("smartrecruiters %s %r failed", board.slug, term)
                     continue
                 for p in postings:
-                    location = clean((p.get("location") or {}).get("fullLocation"))
-                    if (p["id"] in seen or not self.in_target_city(location)
-                            or not title_matches(p.get("name", ""), self.title_keywords)):
+                    try:
+                        if not p["id"]:
+                            raise ValueError("missing posting ID")
+                        location = clean((p.get("location") or {}).get("fullLocation"))
+                        if (p["id"] in seen or not self.in_target_city(location)
+                                or not title_matches(p.get("name", ""), self.title_keywords)):
+                            continue
+                        seen.add(p["id"])
+                    except Exception:
+                        log.exception("smartrecruiters %s malformed posting, skipping", board.slug)
                         continue
-                    seen.add(p["id"])
                     try:
                         yield self._detail(board, p, location)
                     except Exception:
