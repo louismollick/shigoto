@@ -1,3 +1,4 @@
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -5,6 +6,7 @@ import requests
 from pytest import MonkeyPatch
 
 from shigoto.config import Config
+from shigoto.db import Store
 from shigoto.normalize import CityMatcher
 from shigoto.sources import build_sources, gcjobs as gc
 
@@ -80,14 +82,16 @@ def test_fetch_filters_before_detail_and_stops_repeated_page(monkeypatch: Monkey
     assert parse_qs(urlparse(calls[-1]).query)["requestedPage"] == ["2"]
 
 
-def test_source_registration_respects_toggle() -> None:
+def test_source_registration_respects_toggle(tmp_path: Path) -> None:
     config = Config.model_validate({"search_terms": ["lab"], "cities": [{"name": "Ottawa", "jobspy_location": "Ottawa, ON"}],
                                     "title_keywords": ["lab"], "sheet": {}, "jobbank_enabled": False,
                                     "boards": {"successfactors": [{"name": "Acme", "url": "https://jobs.example.com"}]}})
-    sources = build_sources(config, CityMatcher(config.cities))
+    store = Store(tmp_path / "t.db")
+    sources = build_sources(config, CityMatcher(config.cities), store)
     assert {"gcjobs", "successfactors"} <= {s.name for s in sources}
     config.gcjobs_enabled = False
-    assert "gcjobs" not in {s.name for s in build_sources(config, CityMatcher(config.cities))}
+    assert "gcjobs" not in {s.name for s in build_sources(config, CityMatcher(config.cities), store)}
+    store.close()
 
 
 @pytest.mark.parametrize("detail", ["fetch_failure", "<html>No posting content</html>",

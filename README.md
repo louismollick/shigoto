@@ -1,6 +1,6 @@
 # shigoto
 
-Self-hosted job aggregator. Every 6 hours it searches job boards, normalizes and deduplicates results into SQLite, syncs Google Sheets, then reviews a configured batch of jobs, default 40, with Codex CLI using a saved ChatGPT subscription login. Python handles selection, pay arithmetic, validation and writes. Codex judges job fit from the complete posting.
+Self-hosted job aggregator. Every 6 hours it searches job boards, normalizes and deduplicates results into SQLite, syncs Google Sheets, then reviews a configured batch of jobs, default 120, with Codex CLI using a saved ChatGPT subscription login. Python handles selection, pay arithmetic, validation and writes. Codex judges job fit from the complete posting.
 
 ```
 source adapter -> canonical Job -> normalize -> cross-source dedupe -> SQLite -> Google Sheets -> Codex review -> five AI cells
@@ -10,30 +10,33 @@ source adapter -> canonical Job -> normalize -> cross-source dedupe -> SQLite ->
 
 | Source | How | Rate limiting |
 | --- | --- | --- |
-| Indeed | [JobSpy](https://github.com/speedyapply/JobSpy), every term x city | JobSpy: effectively unlimited |
-| LinkedIn | JobSpy, all terms OR'd into one query per city, 90s between cities | Blocks around the 10th page per IP, so ~5-15 page requests per run. Stops for the run on 429. Descriptions fetched for at most 25 new jobs per run, 10-15s apart |
+| Indeed | [JobSpy](https://github.com/speedyapply/JobSpy), every term x city, 7-day window at cap 100; weekly no-date-limit sweep at cap 400 | JobSpy: effectively unlimited |
+| LinkedIn | JobSpy, three focused OR groups; one group per run across all cities, 72-hour window at cap 50, 90s between cities | Blocks around the 10th page per IP. Stops for the run on 429. Descriptions fetched for at most 25 new jobs per run, 10-15s apart |
+| ZipRecruiter | JobSpy, every term x city in Canada, cap 20 per search; JobSpy can paginate when records are skipped | 10s between searches; skips failed queries and stops on 429/999 |
 | Glassdoor | JobSpy, off by default | Blocks after ~30 requests; no descriptions |
 | Canada Job Bank | Public Atom feed (ported from [Career Ops](https://github.com/career-ops-hq/career-ops)) | robots.txt `Crawl-delay: 5` honored for feed and detail pages |
 | GC Jobs | Public HTML results, whole board filtered by title and city; native posters and external HTML details | At least 2s between requests; robots.txt restrictions and crawl delays honored |
 | SuccessFactors | RMK HTML tiles, per term in Canada | At least 1s between requests; robots.txt restrictions and crawl delays honored; details only for title/city matches |
 | Workday | Public CXS API, per term, filtered to Canada or target-city facets | 0.5s between requests, backoff on 429 |
 | SmartRecruiters | Public postings API, per term, `country=ca` | 1s between requests |
-| Greenhouse, Lever, Ashby | Public board APIs, whole board filtered by title keywords | 1 request per board |
+| Greenhouse, Lever, Ashby | Public board APIs, whole board filtered by title keywords; Greenhouse includes HelloFresh | 1 request per board |
 
-Employer boards live in `config.yaml` (`boards:`). Existing boards were verified on 2026-10-06 to have Canadian postings. SuccessFactors includes Bureau Veritas, Cargill, Nestlé Canada and Bunge; Lactalis Canada was verified on 2026-10-12. Ingredion and Unilever use Workday. Some employer career sites still lack a verified adapter route, including Intertek, Charles River and Maple Leaf Foods. Gay Lea Foods uses Dayforce and Danone Canada uses iCIMS, which have no adapter here. Their postings may also appear through Indeed and LinkedIn.
+HelloFresh is included through its Greenhouse board. Employer boards live in `config.yaml` (`boards:`). Existing boards were verified on 2026-10-06 to have Canadian postings. SuccessFactors includes Bureau Veritas, Cargill, Nestlé Canada and Bunge; Lactalis Canada was verified on 2026-10-12. Ingredion and Unilever use Workday. Some employer career sites still lack a verified adapter route, including Intertek, Charles River and Maple Leaf Foods. Gay Lea Foods uses Dayforce and Danone Canada uses iCIMS, which have no adapter here. Their postings may also appear through Indeed and LinkedIn.
 
 GC Jobs is controlled by `gcjobs_enabled`. It lists current public postings without login, using the same second-part HTML request as the site's JavaScript. It preserves the full location text and language requirements. Closing dates stay in the description, not `posted_date`. Listings that only say "Various Locations" cannot pass the city filter; failed detail fetches yield an empty description so an existing complete description is preserved. Nutrien was removed because its CSB API is disallowed by robots.txt.
 
+JobSpy stores successful search checkpoints per site and query group in `meta`, using the pass start time so jobs indexed during a pass remain covered next run. After missed or failed runs, the lookback grows to cover the gap plus two hours. Missing checkpoints trigger a full sweep. Indeed also sweeps weekly to catch delayed indexing. Exceptions and logged search errors skip that query and leave the pass incomplete while remaining queries continue. A 429/999 stops that source for the run. Incomplete passes preserve successful queries' jobs but leave checkpoints, full-sweep markers and group rotation unchanged.
+
 ## Relevance filter
 
-Indeed and Workday match search terms against descriptions, so "food safety" alone would pull in every line cook with a food-handler certificate. Every job's title must therefore contain one of `title_keywords` (whole word, or prefix with a trailing `*`), and none of `exclude_title_keywords`. Company names must not match `exclude_companies`, using the same case/accent-insensitive whole-word and trailing `*` prefix rules. New jobs are ingested only for configured cities (or their suburb aliases) and matching titles. Known postings still update if their latest fields fail the filters. Every run also re-applies the current city, title and company filters to all stored jobs. Jobs that no longer pass get `excluded_at` and disappear from the sheet, but stay in SQLite with their reviews. Relaxing the filters restores them.
+Indeed and Workday match search terms against descriptions, so "food safety" alone would pull in every line cook with a food-handler certificate. Every job's title must therefore contain one of `title_keywords` (whole word, or prefix with a trailing `*`), and none of `exclude_title_keywords`. Company names must not match `exclude_companies`, using the same case/accent-insensitive whole-word and trailing `*` prefix rules. Multi-location text drops US and UK components, then chooses a matching city in configured city order. JobSpy keeps the searched city even for distant suburbs; Codex judges distance. New jobs are ingested only for configured cities (or their suburb aliases) and matching titles. Known postings still update if their latest fields fail the filters. Every run also re-applies the current city, title and company filters to all stored jobs. Jobs that no longer pass get `excluded_at` and disappear from the sheet, but stay in SQLite with their reviews. Relaxing the filters restores them. New rejected postings are saved in `rejected_postings` with raw JSON, a location/title/excluded_title/company reason and first/last-seen timestamps. Later acceptance, through a scrape or replay, preserves the original first-seen date. Rows unseen for 60 days are pruned. Run stats count each rejection reason.
 
 ## Dedup and change detection
 
 - `job_sources` maps every `(source, source_id)` to a `job_id`, so the same posting seen again is always the same job. It also stores the latest raw adapter record as JSON, before normalization, for `shigoto reprocess`.
-- A new posting from another source merges into an existing job when normalized company + title + city match (company suffixes like Inc/Ltd/Canada and punctuation are ignored).
+- A new posting from another source merges when its exact dedupe key matches: normalized company, title and city. Company suffixes like Inc/Ltd/Canada and punctuation are ignored. Two IDs from the same source stay separate. Existing job IDs and source mappings never change.
 - A job's fields come from its first source; other sources only fill blanks, such as Indeed supplying a LinkedIn description. `content_hash` covers title, description, company, city, location, salary and type. Changes to any of those fields move `Updated At` forward, including description enrichment. Existing hashes are migrated without changing historical timestamps.
-- A job becomes a closure candidate when every source can be checked and no full-listing source (Workday, SmartRecruiters, Greenhouse, Lever, Ashby, SuccessFactors or GC Jobs) has seen it in the last two days. Indeed, LinkedIn and Job Bank searches are partial, so their postings are checked directly whether or not they are still listed. Glassdoor cannot be checked, so jobs with a Glassdoor source stay open. Candidates are checked stalest first, at most once per day. Every source must confirm removal before the app sets `closed_at` and marks the job `Closed`:
+- A job becomes a closure candidate when no full-listing source (Workday, SmartRecruiters, Greenhouse, Lever, Ashby, SuccessFactors or GC Jobs) has seen it in the last two days. Indeed, LinkedIn and Job Bank searches are partial, so their postings are checked directly whether or not they are still listed. Glassdoor and ZipRecruiter cannot be checked reliably. Their links are ignored when a job has a checkable source; jobs listed only on those two sites close once none of their links has been seen for 30 days, without requests. Candidates are checked stalest first, at most once per day. Every checkable source must confirm removal before the app sets `closed_at` and marks the job `Closed`:
   - Indeed: one GraphQL `jobData` request (the mobile API JobSpy uses) per 100 jobs reports `expired`. Viewjob pages are behind a bot challenge.
   - LinkedIn: the guest posting page returns 404/410 or shows its "No longer accepting applications" banner. Requests are at least 10s apart, and the first inconclusive answer, usually a rate limit, stops LinkedIn checks for the run.
   - Job Bank and board sources: a posting endpoint returns HTTP 404/410 (expired Job Bank postings redirect to a 410), or a successful complete Ashby board response omits the posting.
@@ -75,7 +78,7 @@ The `Closed` tab is read-only and built from two formulas. Widen both if reviewe
 
 `review.enabled: true` in the shipped config runs reviews after each successful scrape and Sheet sync. `run --no-sheet` and `reprocess` do not review. Manual `review` reads the existing master tab without rebuilding it. Missing required headers stop review rather than changing the sheet. Scheduled and manual commands share a nonblocking lock next to SQLite.
 
-Selection is deterministic: open jobs with a missing, invalid or stale AI timestamp, or no published result for the current posting and policy version, newest `Updated At` first, at most `review.max_per_run` jobs, default 40. Manual `review --limit N` accepts any positive integer and overrides that batch size. Timestamps are compared with their offsets. The first Codex run re-reviews old ChatGPT scores once. This version check replaces the old fixed-date cutoff, so jobs are not repeatedly reselected before that date. Changing the prompt, model or reasoning setting queues a new review.
+Selection is deterministic: open jobs with a missing, invalid or stale AI timestamp, or no published result for the current posting and policy version, newest `Updated At` first, at most `review.max_per_run` jobs, default 120. Manual `review --limit N` accepts any positive integer and overrides that batch size. Timestamps are compared with their offsets. The first Codex run re-reviews old ChatGPT scores once. This version check replaces the old fixed-date cutoff, so jobs are not repeatedly reselected before that date. Changing the prompt, model or reasoning setting queues a new review.
 
 Each fresh Codex invocation receives the candidate profile and scoring instructions in [review_prompt.md](src/shigoto/review_prompt.md), plus the full job data. Possible duplicates with the same company, title and city are included for comparison; Codex must confirm that their descriptions describe the same opening. Confirmed duplicates share the most complete posting's judgment, including across capped runs. Separate shifts and plants can receive different judgments.
 
@@ -108,7 +111,7 @@ After enabling the service, disable the old ChatGPT scheduled review task so the
 uv sync
 uv run shigoto run --no-sheet --only indeed,jobbank   # one run, selected sources, no sheet
 uv run shigoto run                                    # one full run
-uv run shigoto reprocess --no-sheet                    # replay stored raw jobs, re-apply filters locally
+uv run shigoto reprocess --no-sheet                    # replay accepted and rejected raw jobs, re-apply filters locally
 uv run shigoto reprocess                               # replay and rebuild the sheet, without scraping
 uv run shigoto review --dry-run --limit 3               # inspect proposed reviews without saving or writing
 uv run shigoto review --job JOB_ID --limit 1            # publish one eligible job's review
@@ -117,7 +120,7 @@ uv run shigoto serve                                  # loop: next run is due 6h
 uv run mypy src tests && uv run pytest
 ```
 
-`reprocess` uses the current normalization and merge rules. It preserves job/source `first_seen` and `last_seen` and does not reopen closed jobs or run liveness checks. Older source rows without raw JSON remain unchanged, though all stored jobs still have their exclusions re-evaluated. Raw records accumulate for accepted jobs and known postings as sources are fetched after this version is deployed. Newly rejected postings are not stored.
+`reprocess` uses the current normalization and merge rules. It preserves job/source `first_seen` and `last_seen` and does not reopen closed jobs or run liveness checks. Older source rows without raw JSON remain unchanged, though all stored jobs still have their exclusions re-evaluated. Raw records accumulate for accepted and rejected postings as sources are fetched. Rejected rows that now pass become jobs using their original first/last-seen timestamps and leave the rejected table. Rows still rejected keep their sighting timestamps; replay does not extend the 60-day retention window.
 
 `review --job` still respects eligibility; it does not force a fresh score for an already current job. Dry runs may consume subscription usage but do not save judgments or change Sheet cells.
 
@@ -128,4 +131,20 @@ Useful queries:
 ```bash
 sqlite3 /data/shigoto.db "select id, started_at, finished_at, stats from runs order by id desc limit 5"
 sqlite3 /data/shigoto.db "select primary_source, city, count(*) from jobs group by 1, 2"
+```
+
+Unique jobs and latest published AI decisions per source, counting a merged job once per source:
+
+```sql
+WITH latest AS (
+  SELECT job_id, json_extract(fields, '$.decision') AS decision,
+         row_number() OVER (PARTITION BY job_id ORDER BY written_at DESC, rowid DESC) AS n
+  FROM ai_results WHERE error IS NULL AND written_at IS NOT NULL
+)
+SELECT s.source, count(DISTINCT s.job_id) AS jobs,
+       count(DISTINCT CASE WHEN a.decision = 'Recommend' THEN s.job_id END) AS recommend,
+       count(DISTINCT CASE WHEN a.decision = 'Maybe' THEN s.job_id END) AS maybe,
+       count(DISTINCT CASE WHEN a.decision = 'Reject' THEN s.job_id END) AS reject
+FROM job_sources s LEFT JOIN latest a ON a.job_id = s.job_id AND a.n = 1
+GROUP BY s.source;
 ```

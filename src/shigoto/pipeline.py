@@ -10,11 +10,12 @@ from shigoto.db import Store, now_iso
 from shigoto.enrich import enrich_descriptions
 from shigoto.liveness import check_liveness, reset_robots
 from shigoto.models import job_from_json, job_json
-from shigoto.normalize import CityMatcher, normalize
+from shigoto.normalize import CityMatcher, normalize, rejection_reason
 from shigoto.review import review
 from shigoto.sheet_controls import configure_tracker
 from shigoto.sheets import open_worksheet, sync
 from shigoto.sources import Source, build_sources
+from shigoto.sources.jobspy_source import JobSpySource
 
 log = logging.getLogger(__name__)
 
@@ -22,15 +23,16 @@ log = logging.getLogger(__name__)
 def run_once(config: Config, *, sync_sheet: bool = True, only: set[str] | None = None) -> dict[str, int]:
     """Run selected sources, rebuild the sheet, then review if enabled."""
     store = Store(config.db_path)
-    backfill = store.last_finished_run() is None
     run_id = store.start_run(now_iso())
     stats: Counter[str] = Counter()
     try:
         reset_robots()
         matcher = CityMatcher(config.cities)
-        for source in build_sources(config, matcher, backfill):
+        for source in build_sources(config, matcher, store):
             if only is None or source.name in only:
                 stats.update(ingest(store, source, matcher, config))
+        store.prune_rejected(now_iso())
+        store.commit()
         stats.update(enrich_descriptions(store, config))
         stats.update(check_liveness(store, config))
         if sync_sheet:
@@ -63,12 +65,19 @@ def ingest(store: Store, source: Source, matcher: CityMatcher, config: Config) -
                             config.exclude_companies)
             if job is None:
                 stats["dropped"] += 1
+                reason = rejection_reason(raw, config.title_keywords, config.exclude_title_keywords,
+                                          config.exclude_companies)
+                assert reason is not None
+                stats[f"rejected_{reason}"] += 1
                 known = store.conn.execute("SELECT 1 FROM job_sources WHERE source=? AND source_id=?",
                                            (raw.source, raw.source_id)).fetchone()
                 if known is None:
+                    store.reject(raw, snapshot, reason, now)
                     continue
                 # Keep known postings current even when their latest title/location fails filters.
             stats[store.upsert(raw, now, raw=snapshot)] += 1
+        if isinstance(source, JobSpySource) and source.incomplete:
+            stats[f"error_{source.name}"] += 1
     except Exception:
         log.exception("source %s crashed", source.name)
         stats[f"error_{source.name}"] += 1
@@ -102,8 +111,32 @@ def reprocess(config: Config, *, sync_sheet: bool = True) -> dict[str, int]:
             stats["reprocessed"] += 1
             if included is None:
                 stats["dropped"] += 1
+                reason = rejection_reason(job, config.title_keywords, config.exclude_title_keywords,
+                                          config.exclude_companies)
+                assert reason is not None
+                stats[f"rejected_{reason}"] += 1
             # Existing records still need corrected fields so exclusion uses the replayed title/city.
             stats[store.upsert(job, now, raw=record["raw"], seen=False)] += 1
+        store.prune_rejected(now)
+        rejected = store.conn.execute(
+            "SELECT * FROM rejected_postings ORDER BY first_seen, source, source_id"
+        ).fetchall()
+        for record in rejected:
+            job = job_from_json(record["raw"])
+            included = normalize(job, matcher, config.title_keywords, config.exclude_title_keywords,
+                                 config.exclude_companies)
+            stats["reprocessed"] += 1
+            if included is None:
+                reason = rejection_reason(job, config.title_keywords, config.exclude_title_keywords,
+                                          config.exclude_companies)
+                assert reason is not None
+                stats["dropped"] += 1
+                stats[f"rejected_{reason}"] += 1
+                store.reject(job, record["raw"], reason, now, seen=False)
+            else:
+                stats[store.upsert(job, now, raw=record["raw"], seen=False,
+                                   first_seen=record["first_seen"], last_seen=record["last_seen"])] += 1
+                stats["recovered"] += 1
         store.commit()
         if sync_sheet:
             stats.update(sync_to_sheet(store, config))

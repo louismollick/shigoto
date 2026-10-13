@@ -223,3 +223,72 @@ def test_inconclusive_linkedin_stops_linkedin_for_run(monkeypatch: MonkeyPatch, 
     monkeypatch.setattr("shigoto.liveness.now_iso", lambda: "2026-10-04T12:00:00+00:00")
     assert check_liveness(store, config) == {"liveness_checked": 2, "closed": 1}
     assert len([c for c in calls if c.startswith("li-")]) == 1 and "jb-1" in calls
+
+
+@pytest.mark.parametrize("uncheckable", ["zip_recruiter", "glassdoor"])
+@pytest.mark.parametrize("answer", ["gone", "alive", "unknown"])
+def test_indeed_decides_closure_with_uncheckable_link(monkeypatch: MonkeyPatch, tmp_path: Path,
+                                                   uncheckable: str, answer: Liveness) -> None:
+    config = Config(search_terms=[], cities=[], title_keywords=[], sheet=SheetConfig(), liveness_max_per_run=0)
+    store = Store(tmp_path / "t.db")
+    add(store, "indeed", "in-1", "QA")
+    add(store, uncheckable, "other-1", "QA")
+    # Even a fresh uncheckable sighting does not veto a confirmed expiry on Indeed.
+    store.conn.execute("UPDATE job_sources SET last_seen='2026-10-04T12:00:00+00:00' WHERE source=?",
+                       (uncheckable,))
+    store.commit()
+    calls: list[list[str]] = []
+
+    def indeed_check(ids: list[str]) -> dict[str, Liveness]:
+        calls.append(ids)
+        return {source_id: answer for source_id in ids}
+
+    def unexpected(link: SourceLink) -> Liveness:
+        pytest.fail(f"Uncheckable source requested: {link.source}")
+
+    monkeypatch.setattr(indeed, "check_liveness", indeed_check)
+    monkeypatch.setattr("shigoto.liveness.check_source", unexpected)
+    monkeypatch.setattr("shigoto.liveness.now_iso", lambda: "2026-10-04T12:00:00+00:00")
+    assert check_liveness(store, config) == {"liveness_checked": 1, "closed": int(answer == "gone")}
+    assert calls == [["in-1"]]
+    assert store.visible_jobs()[0].status == ("Closed" if answer == "gone" else "")
+    store.close()
+
+
+@pytest.mark.parametrize("sources", [["zip_recruiter"], ["glassdoor"], ["zip_recruiter", "glassdoor"]])
+def test_uncheckable_only_closes_after_30_days_without_requests(monkeypatch: MonkeyPatch, tmp_path: Path,
+                                                             sources: list[str]) -> None:
+    config = Config(search_terms=[], cities=[], title_keywords=[], sheet=SheetConfig(), liveness_max_per_run=0)
+    store = Store(tmp_path / "t.db")
+    for source in sources:
+        add(store, source, f"{source}-1", "QA")
+    # Use source timestamps, including offsets, and wait for the latest link to age.
+    store.conn.execute("UPDATE job_sources SET last_seen='2026-10-02T14:00:00+02:00' WHERE source=?",
+                       (sources[-1],))
+    store.commit()
+    [original] = store.visible_jobs()
+
+    def unexpected_indeed(ids: list[str]) -> dict[str, Liveness]:
+        pytest.fail("An uncheckable-only job should need no Indeed request")
+
+    def unexpected_source(link: SourceLink) -> Liveness:
+        pytest.fail(f"An uncheckable-only job should need no request: {link.source}")
+
+    monkeypatch.setattr(indeed, "check_liveness", unexpected_indeed)
+    monkeypatch.setattr("shigoto.liveness.check_source", unexpected_source)
+    current = "2026-11-01T11:59:59+00:00"
+    monkeypatch.setattr("shigoto.liveness.now_iso", lambda: current)
+    assert check_liveness(store, config) == {"liveness_checked": 0, "closed": 0}
+    assert store.visible_jobs()[0].status == ""
+    current = "2026-11-01T12:00:00+00:00"
+    assert check_liveness(store, config) == {"liveness_checked": 1, "closed": 1}
+    [closed] = store.visible_jobs()
+    assert closed.status == "Closed" and closed.updated_at == original.updated_at
+    assert check_liveness(store, config) == {"liveness_checked": 0, "closed": 0}
+    # Seeing the link again reopens the job and restarts the 30-day wait.
+    add(store, sources[-1], f"{sources[-1]}-1", "QA")
+    store.conn.execute("UPDATE job_sources SET last_seen=? WHERE source=?", (current, sources[-1]))
+    store.commit()
+    assert check_liveness(store, config) == {"liveness_checked": 0, "closed": 0}
+    assert store.visible_jobs()[0].status == ""
+    store.close()

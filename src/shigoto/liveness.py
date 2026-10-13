@@ -46,12 +46,13 @@ def check_source(link: SourceLink) -> Liveness:
 def check_liveness(store: Store, config: Config) -> dict[str, int]:
     now = now_iso()
     targets = store.liveness_candidates(now)
-    indeed_results = indeed.check_liveness(
-        [link.source_id for target in targets for link in target.sources if link.source == "indeed"])
+    indeed_ids = [link.source_id for target in targets for link in target.sources if link.source == "indeed"]
+    indeed_results = indeed.check_liveness(indeed_ids) if indeed_ids else {}
     budget = config.liveness_max_per_run
     linkedin_blocked = False
     checked = closed = 0
     for target in targets:
+        # Empty sources: all links are uncheckable and have been unseen for 30 days.
         result: Liveness | None = "gone"  # None: out of request budget
         # Free Indeed answers first; any source that isn't gone settles the job.
         for link in sorted(target.sources, key=lambda link: link.source != "indeed"):

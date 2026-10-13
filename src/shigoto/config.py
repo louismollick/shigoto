@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -27,14 +27,15 @@ JobSpySiteName = Literal["indeed", "linkedin", "glassdoor", "zip_recruiter", "go
 
 
 class JobSpySite(BaseModel):
-    """One JobSpy board. `combine_terms` ORs all search terms into one query per city,
-    which is how we keep LinkedIn to a handful of requests per run."""
+    """One JobSpy board. Query groups OR their terms; rotation searches one group per run."""
 
     site: JobSpySiteName
-    combine_terms: bool = False
-    results_wanted: int = 50
-    hours_old: int = 24
-    backfill_hours_old: int = 336  # used instead of hours_old on the very first run
+    query_groups: list[Annotated[list[str], Field(min_length=1)]] | None = Field(default=None, min_length=1)
+    rotate_groups: bool = False
+    results_wanted: int = Field(default=50, ge=1)
+    hours_old: int = Field(default=24, ge=1)
+    full_sweep_days: int | None = Field(default=None, ge=1)
+    full_sweep_results_wanted: int = Field(default=400, ge=1)
     delay_seconds: float = 2.0
     enabled: bool = True
 
@@ -85,7 +86,7 @@ class ReviewConfig(BaseModel):
     """Codex judgments use saved ChatGPT login, never an API key."""
 
     enabled: bool = False
-    max_per_run: int = Field(default=40, ge=1)
+    max_per_run: int = Field(default=120, ge=1)
     model: str = "gpt-6.1-sol"
     reasoning_effort: Literal["low", "medium", "high", "xhigh"] = "low"
     timeout_seconds: int = Field(default=180, ge=1)

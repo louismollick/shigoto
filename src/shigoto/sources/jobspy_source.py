@@ -1,24 +1,20 @@
-"""JobSpy adapter: LinkedIn, Indeed, Glassdoor, ... via python-jobspy.
-
-Rate limiting (per JobSpy's README): Indeed has effectively none, so it searches every
-term x city. LinkedIn blocks around the 10th page per IP, so it runs with
-`combine_terms` (one OR query per city), a delay between cities, and stops for the rest
-of the run as soon as JobSpy logs a 429.
-"""
+"""JobSpy searches with per-source/group checkpoints and periodic full sweeps."""
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import re
 import time
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import Iterator, Mapping
+from datetime import datetime, timedelta
 
 from jobspy import scrape_jobs
 import jobspy.indeed as jobspy_indeed
 
 from shigoto.config import City, JobSpySite
+from shigoto.db import Store, now_iso
 from shigoto.models import Job
 from shigoto.text import clean, clean_description, parse_date
 
@@ -44,13 +40,15 @@ jobspy_indeed.job_search_query = include_exact_salary(jobspy_indeed.job_search_q
 
 
 class _BlockDetector(logging.Handler):
-    """Watches JobSpy's own logs for rate-limit responses, which it swallows."""
+    """Watches JobSpy's swallowed search errors, including rate-limit responses."""
 
     def __init__(self) -> None:
         super().__init__(logging.ERROR)
         self.blocked = False
+        self.failed = False
 
     def emit(self, record: logging.LogRecord) -> None:
+        self.failed = True
         msg = record.getMessage()
         if "429" in msg or "999" in msg:
             self.blocked = True
@@ -64,43 +62,86 @@ def build_queries(terms: list[str], combine: bool) -> list[str]:
 
 
 class JobSpySource:
-    def __init__(self, site: JobSpySite, terms: list[str], cities: list[City], backfill: bool = False) -> None:
+    def __init__(self, site: JobSpySite, terms: list[str], cities: list[City], store: Store) -> None:
         self.site = site
-        self.hours_old = site.backfill_hours_old if backfill else site.hours_old
         self.name: str = site.site
         self.terms = terms
         self.cities = cities
+        self.store = store
+        self.incomplete = False
 
     def fetch(self) -> Iterator[Job]:
+        self.incomplete = False
         detector = _BlockDetector()
         jobspy_logger = logging.getLogger(f"JobSpy:{_jobspy_logger_name(self.name)}")
+        groups = self.site.query_groups
+        queries = [build_queries(group, True) for group in groups] if groups else [self.terms]
+        rotation_key = f"jobspy:{self.name}:next_group"
+        index = int(self.store.get_meta(rotation_key) or "0") % len(queries)
+        selected = [index] if groups and self.site.rotate_groups else range(len(queries))
         jobspy_logger.addHandler(detector)
         try:
-            for city in self.cities:
-                for query in build_queries(self.terms, self.site.combine_terms):
-                    if detector.blocked:
-                        log.warning("%s rate-limited us; skipping the rest of this run", self.name)
-                        return
-                    yield from self._search(query, city)
-                    time.sleep(self.site.delay_seconds)
+            for group_index in selected:
+                group_queries = queries[group_index]
+                key = f"jobspy:{self.name}"
+                if groups:
+                    # Changed queries start fresh; reordering groups keeps their history.
+                    identity = hashlib.sha1(group_queries[0].encode()).hexdigest()[:16]
+                    key += f":group:{identity}"
+                started = now_iso()
+                now = datetime.fromisoformat(started)
+                checkpoint = self.store.get_meta(f"{key}:last_success")
+                last_full = self.store.get_meta(f"{key}:last_full_sweep")
+                full_sweep = checkpoint is None or (self.site.full_sweep_days is not None and (
+                    last_full is None or now - datetime.fromisoformat(last_full)
+                    >= timedelta(days=self.site.full_sweep_days)))
+                hours_old = None if full_sweep else max(
+                    self.site.hours_old,
+                    math.ceil((now - datetime.fromisoformat(checkpoint or now.isoformat())).total_seconds() / 3600) + 2,
+                )
+                results_wanted = (self.site.full_sweep_results_wanted if full_sweep
+                                  else self.site.results_wanted)
+                complete = True
+                for city in self.cities:
+                    for query in group_queries:
+                        detector.failed = False
+                        try:
+                            jobs = list(self._search(query, city, hours_old, results_wanted))
+                        except Exception as error:
+                            detector.failed = True
+                            detector.blocked |= "429" in str(error) or "999" in str(error)
+                            log.warning("%s %r in %s failed: %s", self.name, query, city.name, error)
+                        if detector.failed:
+                            complete = False
+                            self.incomplete = True
+                            log.warning("%s %r in %s skipped; pass incomplete%s", self.name, query, city.name,
+                                        " (rate limited, stopping source)" if detector.blocked else "")
+                            if detector.blocked:
+                                return
+                        else:
+                            yield from jobs
+                        time.sleep(self.site.delay_seconds)
+                if not complete:
+                    continue
+                self.store.set_meta(f"{key}:last_success", started)
+                if full_sweep:
+                    self.store.set_meta(f"{key}:last_full_sweep", started)
+                if groups and self.site.rotate_groups:
+                    self.store.set_meta(rotation_key, str((group_index + 1) % len(queries)))
         finally:
             jobspy_logger.removeHandler(detector)
 
-    def _search(self, query: str, city: City) -> Iterator[Job]:
-        try:
-            df = scrape_jobs(
-                site_name=[self.name],
-                search_term=query,
-                location=city.jobspy_location,
-                results_wanted=self.site.results_wanted,
-                hours_old=self.hours_old,
-                country_indeed="Canada",
-                description_format="markdown",
-                verbose=1,
-            )
-        except Exception:
-            log.exception("%s search failed: %r in %s", self.name, query, city.name)
-            return
+    def _search(self, query: str, city: City, hours_old: int | None, results_wanted: int) -> Iterator[Job]:
+        df = scrape_jobs(
+            site_name=[self.name],
+            search_term=query,
+            location=city.jobspy_location,
+            results_wanted=results_wanted,
+            hours_old=hours_old,
+            country_indeed="Canada",
+            description_format="markdown",
+            verbose=1,
+        )
         log.info("%s %r in %s: %d results", self.name, query[:40], city.name, len(df))
         for row in df.to_dict("records"):
             job = row_to_job(row, city.name)
@@ -108,7 +149,7 @@ class JobSpySource:
                 yield job
 
 
-def row_to_job(row: dict[str, Any], city: str) -> Job | None:
+def row_to_job(row: Mapping[str, object], city: str) -> Job | None:
     source_id = clean(row.get("id"))
     url = clean(row.get("job_url"))
     title = clean(row.get("title"))
@@ -202,7 +243,7 @@ def description_salary(description: str, default_currency: str = "CAD") -> str:
     return ""
 
 
-def format_salary(row: dict[str, object]) -> str:
+def format_salary(row: Mapping[str, object]) -> str:
     lo, hi = row.get("min_amount"), row.get("max_amount")
     amounts = [float(v) for v in (lo, hi) if isinstance(v, (int, float)) and math.isfinite(v)]
     currency = clean(row.get("currency")) or "CAD"

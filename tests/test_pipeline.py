@@ -8,7 +8,7 @@ import pytest
 from shigoto import main, run_lock
 from shigoto.config import City, Config, SheetConfig
 from shigoto.db import Store
-from shigoto.models import Job, job_from_json
+from shigoto.models import Job, job_from_json, job_json
 from shigoto.normalize import CityMatcher
 from shigoto.pipeline import ingest, reprocess, run_once
 from shigoto.review import ReviewReport
@@ -49,7 +49,7 @@ def test_run_without_sheet_reapplies_filters_to_history(tmp_path: Path, monkeypa
                      company="Acme", location="Toronto", city="Toronto"), "t1")
     store.commit()
     store.close()
-    monkeypatch.setattr("shigoto.pipeline.build_sources", lambda config, matcher, backfill: [])
+    monkeypatch.setattr("shigoto.pipeline.build_sources", lambda config, matcher, store: [])
     monkeypatch.setattr("shigoto.pipeline.enrich_descriptions", lambda store, config: {})
     monkeypatch.setattr("shigoto.pipeline.check_liveness", lambda store, config: {})
     assert run_once(config, sync_sheet=False) == {"sheet_hidden": 1}
@@ -78,6 +78,7 @@ def test_known_rejected_posting_keeps_latest_fields_and_raw_for_replay(tmp_path:
     assert stats["dropped"] == stats["changed"] == 1
     assert store.reevaluate_exclusions(config, "t2") == 1
     row = store.conn.execute("SELECT title, last_seen FROM jobs").fetchone()
+    assert store.conn.execute("SELECT count(*) FROM rejected_postings").fetchone()[0] == 0
     assert row["title"] == "Restaurant Manager"
     raw = job_from_json(store.conn.execute("SELECT raw FROM job_sources").fetchone()[0])
     assert raw.title == "  Restaurant Manager  "
@@ -193,7 +194,7 @@ def test_ingest_drops_excluded_company(tmp_path: Path) -> None:
             yield Job(source=self.name, source_id="1", url="https://example.com/1", title="QA Technician",
                       company="MERIEUX NutriSciences", location="Toronto")
 
-    assert ingest(store, FakeSource(), CityMatcher(config.cities), config) == {"fetched_indeed": 1, "dropped": 1}
+    assert ingest(store, FakeSource(), CityMatcher(config.cities), config) == {"fetched_indeed": 1, "dropped": 1, "rejected_company": 1}
     assert store.visible_jobs() == []
     assert store.conn.execute("SELECT count(*) FROM job_sources").fetchone()[0] == 0
 
@@ -204,3 +205,137 @@ def test_review_cli_rejects_nonpositive_or_invalid_limit(limit: str, monkeypatch
     with pytest.raises(SystemExit) as error:
         main()
     assert error.value.code == 2
+
+
+@pytest.mark.parametrize("fields,reason", [
+    ({"location": "Boston, MA"}, "location"), ({"title": "Line Cook"}, "title"),
+    ({"title": "QA Manager"}, "excluded_title"), ({"company": "Mérieux"}, "company"),
+])
+def test_rejected_records_keep_raw_reason_and_sighting_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                             fields: dict[str, str], reason: str) -> None:
+    config = config_for(tmp_path / "t.db")
+    config.exclude_title_keywords = ["Manager"]
+    config.exclude_companies = ["Mérieux"]
+    store = Store(config.db_path)
+    posting = Job(source="indeed", source_id="rejected", url="https://example.com/r", title="  QA Technician  ",
+                  company=" Acme ", location=" Toronto ")
+    for key, value in fields.items():
+        setattr(posting, key, value)
+    snapshot = job_json(posting)
+
+    class FakeSource:
+        name = "indeed"
+
+        def fetch(self) -> Iterator[Job]:
+            yield job_from_json(snapshot)
+
+    first, last = "2026-10-01T12:00:00+00:00", "2026-10-02T12:00:00+00:00"
+    monkeypatch.setattr("shigoto.pipeline.now_iso", lambda: first)
+    stats = ingest(store, FakeSource(), CityMatcher(config.cities), config)
+    assert stats == {"fetched_indeed": 1, "dropped": 1, f"rejected_{reason}": 1}
+    monkeypatch.setattr("shigoto.pipeline.now_iso", lambda: last)
+    ingest(store, FakeSource(), CityMatcher(config.cities), config)
+    row = store.conn.execute("SELECT * FROM rejected_postings").fetchone()
+    assert row["raw"] == snapshot and row["reason"] == reason
+    assert row["first_seen"] == first and row["last_seen"] == last
+    assert store.conn.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+    assert store.conn.execute("SELECT count(*) FROM job_sources").fetchone()[0] == 0
+
+
+def test_reprocess_rejected_promotes_merges_and_keeps_failed_sighting_times(tmp_path: Path,
+                                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    config = config_for(tmp_path / "t.db")
+    store = Store(config.db_path)
+    first, last, now = "2026-10-01T12:00:00+00:00", "2026-10-02T12:00:00+00:00", "2026-10-13T12:00:00+00:00"
+    posting = Job(source="indeed", source_id="r", url="https://example.com/r", title="Bioanalytical Technician",
+                  company="Acme", location="Toronto")
+    store.reject(posting, job_json(posting), "title", first)
+    store.reject(posting, job_json(posting), "title", last)
+    # Another rejection will remain excluded and have its reason corrected by replay.
+    other = Job(source="indeed", source_id="other", url="https://example.com/o", title="Line Cook",
+                company="Acme", location="Toronto")
+    store.reject(other, job_json(other), "company", first)
+    store.commit()
+    store.close()
+    monkeypatch.setattr("shigoto.pipeline.now_iso", lambda: now)
+    config.title_keywords.append("bioanalytic*")
+    stats = reprocess(config, sync_sheet=False)
+    assert stats["recovered"] == stats["new"] == stats["dropped"] == stats["rejected_title"] == 1
+    assert stats["reprocessed"] == 2
+    store = Store(config.db_path)
+    [saved] = store.visible_jobs()
+    assert saved.first_seen == first
+    row = store.conn.execute("SELECT * FROM job_sources").fetchone()
+    assert row["first_seen"] == first and row["last_seen"] == last and row["raw"] == job_json(posting)
+    assert store.conn.execute("SELECT last_seen FROM jobs").fetchone()[0] == last
+    rejected = store.conn.execute("SELECT * FROM rejected_postings").fetchone()
+    assert rejected["source_id"] == "other" and rejected["reason"] == "title"
+    assert rejected["first_seen"] == rejected["last_seen"] == first
+    store.close()
+    assert reprocess(config, sync_sheet=False)["reprocessed"] == 2
+
+
+def test_reprocess_rejected_can_merge_into_known_job_without_changing_history(tmp_path: Path,
+                                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    config = config_for(tmp_path / "t.db")
+    store = Store(config.db_path)
+    known = Job(source="workday", source_id="known", url="https://example.com/k", title="QA Technician",
+                company="ALS Global", location="Toronto", city="Toronto")
+    first, now = "2026-10-01T12:00:00+00:00", "2026-10-13T12:00:00+00:00"
+    store.upsert(known, first)
+    [saved] = store.visible_jobs()
+    store.backup_reviews(["Notes"], {saved.job_id: {"Notes": "Keep"}}, first)
+    store.record_liveness(saved.job_id, "gone", "2026-10-04T12:00:00+00:00")
+    rejected = Job(source="indeed", source_id="r", url="https://example.com/r", title="QA Technician",
+                   company="ALS Global Inc.", location="Toronto")
+    store.reject(rejected, job_json(rejected), "company", first)
+    store.commit()
+    store.close()
+    monkeypatch.setattr("shigoto.pipeline.now_iso", lambda: now)
+    assert reprocess(config, sync_sheet=False)["recovered"] == 1
+    store = Store(config.db_path)
+    [merged] = store.visible_jobs()
+    assert merged.job_id == saved.job_id and merged.first_seen == first and merged.status == "Closed"
+    assert store.reviews()[saved.job_id] == {"Notes": "Keep"}
+    assert store.conn.execute("SELECT count(*) FROM rejected_postings").fetchone()[0] == 0
+    assert {r[0] for r in store.conn.execute("SELECT last_seen FROM job_sources")} == {first}
+
+
+def test_run_prunes_stale_rejected_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = config_for(tmp_path / "t.db")
+    store = Store(config.db_path)
+    rejected = Job(source="indeed", source_id="r", url="u", title="Cook", company="Acme", location="Toronto")
+    store.reject(rejected, job_json(rejected), "title", "2026-08-01T12:00:00+00:00")
+    store.commit()
+    store.close()
+    monkeypatch.setattr("shigoto.pipeline.now_iso", lambda: "2026-10-13T12:00:00+00:00")
+    monkeypatch.setattr("shigoto.pipeline.build_sources", lambda *args: [])
+    monkeypatch.setattr("shigoto.pipeline.enrich_descriptions", lambda *args: {})
+    monkeypatch.setattr("shigoto.pipeline.check_liveness", lambda *args: {})
+    run_once(config, sync_sheet=False)
+    store = Store(config.db_path)
+    assert store.conn.execute("SELECT count(*) FROM rejected_postings").fetchone()[0] == 0
+
+
+def test_scrape_acceptance_preserves_rejected_first_seen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = config_for(tmp_path / "t.db")
+    store = Store(config.db_path)
+    posting = Job(source="indeed", source_id="r", url="https://example.com/r", title="QA Technician",
+                  company="Acme", location="Toronto")
+    first, now = "2026-10-01T12:00:00+00:00", "2026-10-13T12:00:00+00:00"
+    store.reject(posting, job_json(posting), "title", first)
+
+    class FakeSource:
+        name = "indeed"
+
+        def fetch(self) -> Iterator[Job]:
+            yield posting
+
+    monkeypatch.setattr("shigoto.pipeline.now_iso", lambda: now)
+    assert ingest(store, FakeSource(), CityMatcher(config.cities), config)["new"] == 1
+    [accepted] = store.visible_jobs()
+    assert accepted.first_seen == first and accepted.updated_at == now
+    source_row = store.conn.execute("SELECT first_seen, last_seen FROM job_sources").fetchone()
+    assert tuple(source_row) == (first, now)
+    assert store.conn.execute("SELECT last_seen FROM jobs").fetchone()[0] == now
+    assert store.conn.execute("SELECT count(*) FROM rejected_postings").fetchone()[0] == 0

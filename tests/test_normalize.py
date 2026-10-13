@@ -1,6 +1,9 @@
 from datetime import date
+from pathlib import Path
 
-from shigoto.config import City
+import pytest
+
+from shigoto.config import City, load_config
 from shigoto.models import Job
 from shigoto.normalize import CityMatcher, dedupe_key, normalize, title_matches
 
@@ -66,3 +69,51 @@ def test_company_exclusion_uses_word_and_prefix_matching() -> None:
     assert normalize(job(company="MérieuxCanada"), matcher, ["QA"], [], ["merieux*"]) is None
     assert normalize(job(company="MérieuxCanada"), matcher, ["QA"], [], ["Mérieux"]) is not None
     assert normalize(job(company="Acme"), matcher, ["QA"], [], ["Mérieux"]) is not None
+
+
+@pytest.mark.parametrize("separator", [";", "|", " / ", "\n"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_multi_location_foreign_component_does_not_veto(separator: str, reverse: bool) -> None:
+    parts = ["Toronto, ON", "Boston, MA, United States"]
+    if reverse:
+        parts.reverse()
+    location = separator.join(parts)
+    assert matcher.match(location) == "Toronto"
+    normalized = normalize(job(location=location), matcher, ["QA"], [], [])
+    assert normalized is not None and normalized.city == "Toronto"
+    assert matcher.match(separator.join(["Vancouver, WA", "Ottawa, IL"])) is None
+
+
+@pytest.mark.parametrize("separator", [";", "|", " / ", "\n"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_multi_location_uses_configured_city_priority(separator: str, reverse: bool) -> None:
+    parts = ["Toronto, ON", "Vancouver, BC"]
+    if reverse:
+        parts.reverse()
+    location = separator.join(parts)
+    assert matcher.match(location) == matcher.match("Vancouver, BC, Toronto, ON") == "Toronto"
+    reversed_matcher = CityMatcher(list(reversed(CITIES)))
+    assert reversed_matcher.match(location) == "Vancouver"
+
+
+@pytest.mark.parametrize("location", ["Toronto, ON; Boston, MA", "Boston, MA; Toronto, ON",
+                                     "Toronto, England; Vancouver, BC", "Vancouver, BC; Toronto, England"])
+def test_multi_location_drops_foreign_components(location: str) -> None:
+    assert matcher.match(location) == ("Vancouver" if "England" in location else "Toronto")
+
+
+@pytest.mark.parametrize("location,city", [
+    ("Rocky View County, AB", "Calgary"), ("Cloverdale, BC", "Vancouver"), ("Mission, BC", "Vancouver"),
+    ("Bowmanville, ON", "Toronto"), ("Bradford, ON", "Toronto"), ("Bradford West Gwillimbury, ON", "Toronto"),
+])
+def test_new_config_aliases(location: str, city: str) -> None:
+    config = load_config(Path("config.yaml"))
+    assert CityMatcher(config.cities).match(location) == city
+
+
+@pytest.mark.parametrize("title", ["Bioanalytical Technician", "Chemical Technologist", "Food Inspector",
+                                   "Food Inspection Officer", "Preparation Technician", "Diet Technician"])
+def test_recall_title_additions(title: str) -> None:
+    config = load_config(Path("config.yaml"))
+    assert normalize(job(title=title), CityMatcher(config.cities), config.title_keywords,
+                     config.exclude_title_keywords, config.exclude_companies) is not None

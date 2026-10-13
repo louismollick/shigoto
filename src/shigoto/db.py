@@ -20,7 +20,7 @@ from typing import Literal
 
 from shigoto.config import Config
 from shigoto.models import Job, Liveness, job_json
-from shigoto.normalize import dedupe_key, title_matches
+from shigoto.normalize import RejectionReason, dedupe_key, title_matches
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -56,6 +56,15 @@ CREATE TABLE IF NOT EXISTS job_sources (
     PRIMARY KEY (source, source_id)
 );
 CREATE INDEX IF NOT EXISTS job_sources_job ON job_sources(job_id);
+CREATE TABLE IF NOT EXISTS rejected_postings (
+    source TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    raw TEXT NOT NULL,
+    reason TEXT NOT NULL CHECK (reason IN ('location', 'title', 'excluded_title', 'company')),
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    PRIMARY KEY (source, source_id)
+);
 CREATE TABLE IF NOT EXISTS reviews (
     job_id TEXT PRIMARY KEY,
     data TEXT NOT NULL,
@@ -89,7 +98,9 @@ FULL_LISTING_SOURCES = frozenset({
 })
 # Searches here are partial, so absence proves nothing, but each posting can be checked directly.
 DIRECT_CHECK_SOURCES = frozenset({"indeed", "linkedin", "jobbank"})
+UNCHECKABLE_SOURCES = frozenset({"zip_recruiter", "glassdoor"})
 CLOSED_AFTER = timedelta(days=2)
+UNCHECKABLE_CLOSED_AFTER = timedelta(days=30)
 
 @dataclass(frozen=True)
 class StoredJob:
@@ -174,12 +185,18 @@ class Store:
     def close(self) -> None:
         self.conn.close()
 
-    def upsert(self, job: Job, now: str, *, raw: str | None = None, seen: bool = True) -> UpsertResult:
+    def upsert(self, job: Job, now: str, *, raw: str | None = None, seen: bool = True,
+               first_seen: str | None = None, last_seen: str | None = None) -> UpsertResult:
         """Merge a normalized job. `seen=False` replays raw data without changing recency or closure."""
         c = self.conn
         mapped = c.execute("SELECT job_id FROM job_sources WHERE source=? AND source_id=?",
                            (job.source, job.source_id)).fetchone()
         job_id: str = mapped["job_id"] if mapped else make_job_id(job)
+        if not mapped:
+            rejected = c.execute("SELECT first_seen FROM rejected_postings WHERE source=? AND source_id=?",
+                                 (job.source, job.source_id)).fetchone()
+            if rejected and first_seen is None:
+                first_seen = rejected["first_seen"]
         if not mapped and c.execute("SELECT 1 FROM job_sources WHERE job_id=? AND source=?",
                                     (job_id, job.source)).fetchone():
             job_id = make_job_id(job, distinct=True)  # same source, different id: a separate posting
@@ -189,8 +206,10 @@ class Store:
                ON CONFLICT (source, source_id) DO UPDATE SET
                last_seen=CASE WHEN ? THEN excluded.last_seen ELSE job_sources.last_seen END,
                url=excluded.url, raw=excluded.raw""",
-            (job.source, job.source_id, job_id, job.url, now, now, raw if raw is not None else job_json(job), seen),
+            (job.source, job.source_id, job_id, job.url, first_seen or now, last_seen or now,
+             raw if raw is not None else job_json(job), seen),
         )
+        c.execute("DELETE FROM rejected_postings WHERE source=? AND source_id=?", (job.source, job.source_id))
         posted = job.posted_date.isoformat() if job.posted_date else None
         row = c.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
         if row is None:
@@ -201,7 +220,7 @@ class Store:
                    posted_date, salary, job_type, url, content_hash, first_seen, last_seen, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (job_id, job.source, job.title, job.company, job.city, job.location, job.description,
-                 posted, job.salary, job.job_type, job.url, h, now, now, now),
+                 posted, job.salary, job.job_type, job.url, h, first_seen or now, last_seen or now, now),
             )
             return "new"
 
@@ -234,6 +253,27 @@ class Store:
     def commit(self) -> None:
         self.conn.commit()
 
+    def get_meta(self, key: str) -> str | None:
+        row = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+
+    def reject(self, job: Job, raw: str, reason: RejectionReason, now: str, *, seen: bool = True) -> None:
+        self.conn.execute(
+            """INSERT INTO rejected_postings (source, source_id, raw, reason, first_seen, last_seen)
+               VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (source, source_id) DO UPDATE SET
+               raw=excluded.raw, reason=excluded.reason,
+               last_seen=CASE WHEN ? THEN excluded.last_seen ELSE rejected_postings.last_seen END""",
+            (job.source, job.source_id, raw, reason, now, now, seen),
+        )
+
+    def prune_rejected(self, now: str) -> int:
+        cutoff = (datetime.fromisoformat(now) - timedelta(days=60)).isoformat()
+        return self.conn.execute("DELETE FROM rejected_postings WHERE julianday(last_seen) < julianday(?)",
+                                 (cutoff,)).rowcount
+
     def missing_descriptions(self, source: str, limit: int) -> list[DescriptionTarget]:
         """Newest jobs with no description that `source` could describe, never tried before."""
         rows = self.conn.execute(
@@ -256,29 +296,35 @@ class Store:
         self.conn.commit()
 
     def liveness_candidates(self, now: str) -> list[LivenessTarget]:
-        """Open jobs whose every source can be checked, stalest first, checked at most once per day.
+        """Open jobs due for closure checks, stalest first, checked at most once per day.
 
         Full-listing sources must also be missing from their listings for CLOSED_AFTER;
-        a recent sighting there already proves the job is open.
+        a recent sighting there already proves the job is open. Uncheckable links are
+        omitted; an empty sources list means all links have been unseen for 30 days.
         """
         cutoff = (datetime.fromisoformat(now) - CLOSED_AFTER).isoformat()
+        uncheckable_cutoff = (datetime.fromisoformat(now) - UNCHECKABLE_CLOSED_AFTER).isoformat()
         checked_cutoff = (datetime.fromisoformat(now) - timedelta(days=1)).isoformat()
         full, checkable = sorted(FULL_LISTING_SOURCES), sorted(FULL_LISTING_SOURCES | DIRECT_CHECK_SOURCES)
+        supported = sorted(set(checkable) | UNCHECKABLE_SOURCES)
         rows = self.conn.execute(
             f"""SELECT j.job_id FROM jobs j JOIN job_sources s ON s.job_id=j.job_id
                 WHERE j.closed_at IS NULL AND (j.liveness_checked_at IS NULL
                     OR julianday(j.liveness_checked_at) <= julianday(?))
                 GROUP BY j.job_id
-                HAVING min(s.source IN ({",".join("?" * len(checkable))}))=1
-                    AND coalesce(max(CASE WHEN s.source IN ({",".join("?" * len(full))})
-                                     THEN julianday(s.last_seen) END), 0) < julianday(?)
+                HAVING min(s.source IN ({",".join("?" * len(supported))}))=1
+                    AND CASE WHEN max(s.source IN ({",".join("?" * len(checkable))}))=1
+                        THEN coalesce(max(CASE WHEN s.source IN ({",".join("?" * len(full))})
+                                          THEN julianday(s.last_seen) END), 0) < julianday(?)
+                        ELSE max(julianday(s.last_seen)) <= julianday(?) END
                 ORDER BY max(julianday(s.last_seen)), j.job_id""",
-            (checked_cutoff, *checkable, *full, cutoff),
+            (checked_cutoff, *supported, *checkable, *full, cutoff, uncheckable_cutoff),
         ).fetchall()
         return [LivenessTarget(row["job_id"], [
             SourceLink(s["source"], s["source_id"], s["url"])
             for s in self.conn.execute("SELECT source, source_id, url FROM job_sources WHERE job_id=?",
                                        (row["job_id"],))
+            if s["source"] not in UNCHECKABLE_SOURCES
         ]) for row in rows]
 
     def record_liveness(self, job_id: str, result: Liveness, now: str) -> None:

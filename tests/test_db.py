@@ -89,12 +89,14 @@ def test_inconclusive_or_alive_check_stays_open(tmp_path: Path, result: Liveness
     assert store.liveness_candidates("2026-10-05T11:59:59+00:00") == []
     assert len(store.liveness_candidates("2026-10-05T12:00:00+00:00")) == 1
 
-def test_unchecked_source_prevents_closure_candidate(tmp_path: Path) -> None:
+@pytest.mark.parametrize("source", ["glassdoor", "zip_recruiter"])
+def test_uncheckable_link_is_omitted_from_closure_candidate(tmp_path: Path, source: str) -> None:
     store = Store(tmp_path / "t.db")
     store.upsert(job(source="workday"), "2026-10-01T12:00:00+00:00")
-    store.upsert(job(source="glassdoor"), "2026-10-01T12:00:00+00:00")
+    store.upsert(job(source=source), "2026-10-01T12:00:00+00:00")
     store.commit()
-    assert store.liveness_candidates("2026-10-10T12:00:00+00:00") == []
+    [candidate] = store.liveness_candidates("2026-10-10T12:00:00+00:00")
+    assert [link.source for link in candidate.sources] == ["workday"]
     assert store.visible_jobs()[0].status == ""
 
 
@@ -328,3 +330,42 @@ def test_company_exclusions_hide_and_restore_without_losing_reviews(tmp_path: Pa
     assert store.reevaluate_exclusions(config, "t4") == 0
     assert store.visible_jobs()[0].updated_at == "t1"
     assert store.reviews()[saved.job_id] == {"Notes": "Keep this"}
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_unrelated_employers_with_shared_words_stay_separate(tmp_path: Path, reverse: bool) -> None:
+    store = Store(tmp_path / "t.db")
+    companies = ["Metro", "Metro Supply Chain"]
+    if reverse:
+        companies.reverse()
+    store.upsert(job(company=companies[0]), "t1")
+    [original] = store.visible_jobs()
+    store.backup_reviews(["Notes"], {original.job_id: {"Notes": "Keep"}}, "t1")
+    assert store.upsert(job(company=companies[1], source="linkedin"), "t2") == "new"
+    assert len(store.visible_jobs()) == 2
+    assert {j.company for j in store.visible_jobs()} == set(companies)
+    assert store.reviews()[original.job_id] == {"Notes": "Keep"}
+    assert store.conn.execute("SELECT count(DISTINCT job_id) FROM job_sources").fetchone()[0] == 2
+
+
+def test_existing_mappings_do_not_merge_retroactively(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(company="ALS"), "t1")
+    store.upsert(job(company="Different", source="linkedin"), "t1")
+    ids = [r[0] for r in store.conn.execute("SELECT job_id FROM job_sources ORDER BY source")]
+    store.upsert(job(company="ALS Global", source="linkedin"), "t2")
+    assert [r[0] for r in store.conn.execute("SELECT job_id FROM job_sources ORDER BY source")] == ids
+    assert len(store.visible_jobs()) == 2
+
+
+def test_rejected_prune_uses_last_sighting_and_offsets(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    raw = job_json(job())
+    store.reject(job(), raw, "title", "2026-08-14T14:00:00+02:00")
+    assert store.prune_rejected("2026-10-13T12:00:00+00:00") == 0
+    assert store.prune_rejected("2026-10-13T12:00:01+00:00") == 1
+    store.reject(job(), raw, "title", "2026-08-01T12:00:00+00:00")
+    store.reject(job(), raw, "company", "2026-10-01T12:00:00+00:00")
+    row = store.conn.execute("SELECT * FROM rejected_postings").fetchone()
+    assert row["first_seen"] == "2026-08-01T12:00:00+00:00" and row["reason"] == "company"
+    assert store.prune_rejected("2026-10-13T12:00:00+00:00") == 0

@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from typing import Protocol
 
 from shigoto.config import Config
+from shigoto.db import Store
 from shigoto.models import Job
 from shigoto.normalize import CityMatcher
 from shigoto.sources.ats import BoardSource, SmartRecruitersSource, ashby_board, greenhouse_board, lever_board
@@ -22,13 +23,13 @@ class Source(Protocol):
     def fetch(self) -> Iterator[Job]: ...
 
 
-def build_sources(config: Config, matcher: CityMatcher, backfill: bool = False) -> list[Source]:
-    """All enabled sources. `backfill` widens JobSpy's recency window for the first run."""
+def build_sources(config: Config, matcher: CityMatcher, store: Store) -> list[Source]:
+    """All enabled sources, with persistent JobSpy search checkpoints."""
     def is_target(location: str) -> bool:
         return matcher.match(location) is not None
 
     terms, boards, keywords = config.search_terms, config.boards, config.title_keywords
-    sources: list[Source] = [JobSpySource(s, terms, config.cities, backfill) for s in config.jobspy if s.enabled]
+    sources: list[Source] = [JobSpySource(s, terms, config.cities, store) for s in config.jobspy if s.enabled]
     if config.jobbank_enabled:
         sources.append(JobBankSource(terms))
     if config.gcjobs_enabled:

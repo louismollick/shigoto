@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from typing import Literal
 
 from shigoto.config import City
 from shigoto.models import Job
@@ -34,12 +35,15 @@ class CityMatcher:
         ]
 
     def match(self, location: str) -> str | None:
-        folded = fold(location)
-        foreign = _FOREIGN_WORDS.search(folded) or _US_STATE_CODE.search(location)
-        if foreign and "canada" not in folded:
-            return None
+        components = []
+        for component in re.split(r";|\|| / |\n", location):
+            folded = fold(component)
+            foreign = _FOREIGN_WORDS.search(folded) or _US_STATE_CODE.search(component)
+            if foreign and "canada" not in folded:
+                continue
+            components.append(folded)
         for name, pattern in self._patterns:
-            if pattern.search(folded):
+            if any(pattern.search(component) for component in components):
                 return name
         return None
 
@@ -60,19 +64,30 @@ def normalize(job: Job, matcher: CityMatcher, title_keywords: list[str],
     doesn't look relevant, or its company is excluded."""
     job.title = clean(job.title)
     job.company = clean(job.company)
+    if not job.city:
+        job.city = matcher.match(job.location) or ""
     job.location = clean(job.location)
     job.salary = clean(job.salary)
     job.job_type = clean(job.job_type)
     job.description = clean_description(job.description)
+    return job if rejection_reason(job, title_keywords, exclude_title_keywords, exclude_companies) is None else None
+
+
+RejectionReason = Literal["location", "title", "excluded_title", "company"]
+
+
+def rejection_reason(job: Job, title_keywords: list[str], exclude_title_keywords: list[str],
+                     exclude_companies: list[str]) -> RejectionReason | None:
+    """Explain a rejection after normalize() has cleaned fields and assigned the city."""
     if not job.city:
-        job.city = matcher.match(job.location) or ""
-    if not job.city or not job.title:
-        return None
-    if not title_matches(job.title, title_keywords):
-        return None
-    if title_matches(job.title, exclude_title_keywords) or title_matches(job.company, exclude_companies):
-        return None
-    return job
+        return "location"
+    if not job.title or not title_matches(job.title, title_keywords):
+        return "title"
+    if title_matches(job.title, exclude_title_keywords):
+        return "excluded_title"
+    if title_matches(job.company, exclude_companies):
+        return "company"
+    return None
 
 
 _COMPANY_SUFFIXES = re.compile(
