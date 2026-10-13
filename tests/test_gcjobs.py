@@ -96,7 +96,7 @@ def test_source_registration_respects_toggle(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("detail", ["fetch_failure", "<html>No posting content</html>",
                                     '<main><h1>You will leave the GC Jobs Web site</h1><a href="https://example.com/1">Job</a></main>'])
-def test_detail_failure_yields_empty_description(monkeypatch: MonkeyPatch, detail: str) -> None:
+def test_detail_failure_preserves_search_metadata(monkeypatch: MonkeyPatch, detail: str) -> None:
     def get_text(self: gc.GCJobsSource, url: str) -> str:
         if "page2440" in url:
             return RESULTS
@@ -106,4 +106,39 @@ def test_detail_failure_yields_empty_description(monkeypatch: MonkeyPatch, detai
 
     monkeypatch.setattr(gc.GCJobsSource, "_get_text", get_text)
     [job] = list(gc.GCJobsSource(["laboratory"], lambda s: "Ottawa" in s).fetch())
-    assert job.description == ""
+    assert "Closing date: 2026-10-30" in job.description
+    assert "Various language requirements" in job.description
+    assert "Test food for bacteria." not in job.description
+
+
+def test_description_retry_follows_external_posting(monkeypatch: MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def get_text(url: str) -> str:
+        calls.append(url)
+        return ('<main><h1>You will leave the GC Jobs Web site</h1><a href="https://example.com/poster">Job</a></main>'
+                if url == 'https://example.com/gc' else DETAIL)
+
+    monkeypatch.setattr(gc._session, 'get_text', get_text)
+    description = gc.fetch_description('https://example.com/gc')
+    assert 'External posting: https://example.com/poster' in description
+    assert 'Test food for bacteria.' in description
+    assert calls == ['https://example.com/gc', 'https://example.com/poster']
+
+
+def test_search_metadata_uses_single_line_breaks_for_detail_retry_detection() -> None:
+    markup = RESULTS.replace('Various language requirements<br>$60,000 to $70,000',
+                             '<span>Various language requirements</span>\n\n<span>$60,000 to $70,000</span>')
+    job = gc.parse_results(markup)[0]
+    assert job.description == 'Closing date: 2026-10-30\nVarious language requirements\n$60,000 to $70,000'
+    assert '\n\n' not in job.description
+
+
+def test_empty_external_detail_remains_retryable(monkeypatch: MonkeyPatch) -> None:
+    def get_text(url: str) -> str:
+        return ('<main><h1>You will leave the GC Jobs Web site</h1><a href="https://example.com/poster">Job</a></main>'
+                if url == 'https://example.com/gc' else '<main></main>')
+
+    monkeypatch.setattr(gc._session, 'get_text', get_text)
+    with pytest.raises(ValueError, match='posting text'):
+        gc.fetch_description('https://example.com/gc')

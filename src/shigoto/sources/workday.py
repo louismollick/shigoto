@@ -27,7 +27,7 @@ from shigoto.text import clean, html_to_text, parse_date
 log = logging.getLogger(__name__)
 
 PAGE_SIZE = 20
-MAX_PAGES = 5
+MAX_PAGES = 50
 
 # Workday's WAF rate-limits bursts; Career Ops uses 250ms between pages.
 _session = PoliteSession(min_interval=0.5)
@@ -99,24 +99,46 @@ class WorkdaySource:
             return
         paths: dict[str, dict[str, Any]] = {}
         for term in self.terms:
+            seen: set[str] = set()
+            total = 0
             for page in range(MAX_PAGES):
-                data = _session.post_json(ep.jobs_api, {
-                    "limit": PAGE_SIZE, "offset": page * PAGE_SIZE, "searchText": term, "appliedFacets": facets,
-                })
+                try:
+                    data = _session.post_json(ep.jobs_api, {
+                        "limit": PAGE_SIZE, "offset": page * PAGE_SIZE, "searchText": term, "appliedFacets": facets,
+                    })
+                except Exception:
+                    log.exception("workday %s %r page %d failed", board.name, term, page + 1)
+                    break
+                # Later CXS pages often report zero despite having more postings.
+                if not total and data.get("total", 0) > 0:
+                    total = data["total"]
                 postings = data.get("jobPostings") or []
+                fresh = {p["externalPath"] for p in postings if p.get("externalPath")} - seen
+                if not fresh:
+                    break
+                seen.update(fresh)
                 for p in postings:
                     # searchText also matches descriptions, so re-check the title
                     if p.get("externalPath") and title_matches(p.get("title", ""), self.title_keywords):
                         paths.setdefault(p["externalPath"], p)
-                if len(postings) < PAGE_SIZE or (page + 1) * PAGE_SIZE >= data.get("total", 0):
+                if total and len(seen) >= total:
                     break
+            else:
+                log.warning("workday %s %r hit page cap", board.name, term)
         log.info("workday %s: %d postings match terms", board.name, len(paths))
-        for path in paths:
+        for path, summary in paths.items():
             try:
                 job = self._detail(board, ep, path)
             except Exception:
                 log.exception("workday detail %s failed", path)
-                continue
+                # The first bullet is the same requisition ID used by the detail API.
+                bullets = summary.get("bulletFields") or []
+                job = Job(
+                    source="workday",
+                    source_id=f"{urlparse(board.url).hostname}:{bullets[0] if bullets else path}",
+                    url=f"{ep.site_base}{path}", title=clean(summary.get("title")), company=board.name,
+                    location=clean(summary.get("locationsText")),
+                )
             if job:
                 yield job
 

@@ -2,8 +2,8 @@
 
 Public Atom feed, no auth. robots.txt sets `Crawl-delay: 5`, which we honor for every
 request including detail pages. `locationstring` doesn't filter reliably, so we search
-nationwide per keyword and let normalize() keep only target cities. The feed only
-lists recent postings, which is fine because we poll every few hours.
+nationwide per keyword and let normalize() keep only target cities. The recent feed
+is supplemented with paginated HTML results for older open postings.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
@@ -23,9 +24,12 @@ from shigoto.text import clean, html_to_text, parse_date
 log = logging.getLogger(__name__)
 
 FEED_URL = "https://www.jobbank.gc.ca/jobsearch/feed/jobSearchRSSfeed"
+SEARCH_URL = "https://www.jobbank.gc.ca/jobsearch/jobsearch"
 PAGE_SIZE = 100
 MAX_PAGES = 5
 CRAWL_DELAY = 5.0
+SEARCH_PAGE_SIZE = 25
+SEARCH_MAX_PAGES = 1000
 ATOM = "{http://www.w3.org/2005/Atom}"
 
 _session = PoliteSession(min_interval=CRAWL_DELAY, respect_robots=True)
@@ -38,19 +42,98 @@ class JobBankSource:
         self.terms = terms
 
     def fetch(self) -> Iterator[Job]:
+        seen: set[str] = set()
+        for job in self._feed():
+            if job.source_id not in seen:
+                seen.add(job.source_id)
+                yield job
+        if html_search_due():
+            for job in self._search():
+                if job.source_id not in seen:
+                    seen.add(job.source_id)
+                    yield job
+
+    def _feed(self) -> Iterator[Job]:
         for term in self.terms:
             for page in range(1, MAX_PAGES + 1):
                 url = f"{FEED_URL}?{urlencode({'searchstring': term, 'locationstring': '', 'page': page})}"
                 try:
                     xml = _session.get_text(url)
+                    jobs = parse_feed(xml)
                 except Exception:
                     log.exception("jobbank feed failed for %r", term)
                     break
-                jobs = parse_feed(xml)
                 log.info("jobbank %r page %d: %d entries", term, page, len(jobs))
                 yield from jobs
                 if len(jobs) < PAGE_SIZE:
                     break
+
+    def _search(self) -> Iterator[Job]:
+        for term in self.terms:
+            seen: set[str] = set()
+            total = 0
+            failures = 0
+            for page in range(1, SEARCH_MAX_PAGES + 1):
+                # searchstring resolves keyword/occupation filters; term alone does not.
+                url = f"{SEARCH_URL}?{urlencode({'searchstring': term, 'sort': 'D', 'page': page})}"
+                try:
+                    jobs, total = parse_search(_session.get_text(url))
+                except Exception:
+                    log.exception("jobbank search %r page %d failed", term, page)
+                    failures += 1
+                    if failures >= 2 or (total and page * SEARCH_PAGE_SIZE >= total):
+                        break
+                    continue
+                failures = 0
+                fresh = [job for job in jobs if job.source_id not in seen]
+                if jobs and not fresh:
+                    log.warning("jobbank search %r page %d repeated, stopping", term, page)
+                    break
+                log.info("jobbank search %r page %d: %d of %d entries", term, page, len(jobs), total)
+                for job in fresh:
+                    seen.add(job.source_id)
+                    yield job
+                if page * SEARCH_PAGE_SIZE >= total:
+                    break
+            else:
+                log.warning("jobbank search %r hit page cap", term)
+
+
+def html_search_due(now: datetime | None = None) -> bool:
+    """One six-hour UTC slot for the daily HTML pass; the feed runs every time."""
+    return (now or datetime.now(timezone.utc)).hour < 6
+
+
+def parse_search(markup: str) -> tuple[list[Job], int]:
+    soup = BeautifulSoup(markup, "html.parser")
+    count = soup.select_one("#results-count")
+    if not count:
+        raise ValueError("Job Bank search has no results count")
+    total = int(count.get_text(strip=True).replace(",", ""))
+    jobs = []
+    for row in soup.select("article[id^=article-]"):
+        try:
+            link = row.select_one("a.resultJobItem")
+            title = row.select_one(".noctitle")
+            match = re.search(r"/jobposting/(\d+)(?:[;/?]|$)", clean(link.get("href"))) if link else None
+            if not match or not title or not clean(title.get_text()):
+                raise ValueError("missing posting ID or title")
+            for hidden in row.select(".wb-inv"):
+                hidden.decompose()
+            fields = {name: clean(node.get_text(" ", strip=True)) if (node := row.select_one(f".{name}")) else ""
+                      for name in ("business", "location", "salary", "date")}
+            try:
+                posted = datetime.strptime(fields["date"], "%B %d, %Y").date()
+            except ValueError:
+                posted = None
+            jobs.append(Job(
+                source="jobbank", source_id=match[1], url=f"https://www.jobbank.gc.ca/jobsearch/jobposting/{match[1]}",
+                title=clean(title.get_text(" ", strip=True)), company=fields["business"], location=fields["location"],
+                salary=re.sub(r"^Salary\s*", "", fields["salary"]), posted_date=posted,
+            ))
+        except Exception:
+            log.exception("jobbank malformed search row, skipping")
+    return jobs, total
 
 
 def parse_feed(xml: str) -> list[Job]:
@@ -86,8 +169,13 @@ def summary_field(summary_html: str, label: str) -> str:
 def fetch_description(job_url: str) -> str:
     """Detail page text: the requirements/responsibilities block."""
     page = _session.get_text(job_url)
-    block = BeautifulSoup(page, "html.parser").select_one(".job-posting-detail-requirements")
-    return html_to_text(str(block)) if block else ""
+    soup = BeautifulSoup(page, "html.parser")
+    block = soup.select_one(".job-posting-detail-requirements")
+    if block and (description := html_to_text(str(block))):
+        return description
+    if soup.select_one(".job-posting-content #externalJobLink[href]"):
+        return ""  # External listings genuinely have no native requirements block.
+    raise ValueError("Job Bank detail has no requirements or external posting link")
 
 
 def check_liveness(url: str, source_id: str) -> Liveness:
