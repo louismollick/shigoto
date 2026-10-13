@@ -339,3 +339,24 @@ def test_scrape_acceptance_preserves_rejected_first_seen(tmp_path: Path, monkeyp
     assert tuple(source_row) == (first, now)
     assert store.conn.execute("SELECT last_seen FROM jobs").fetchone()[0] == now
     assert store.conn.execute("SELECT count(*) FROM rejected_postings").fetchone()[0] == 0
+
+
+def test_ingest_commits_long_sources_periodically(tmp_path: Path) -> None:
+    path = tmp_path / "t.db"
+    config = config_for(path)
+    store = Store(path)
+    visible_mid_fetch: list[int] = []
+
+    class FakeSource:
+        name = "jobbank"
+
+        def fetch(self) -> Iterator[Job]:
+            for i in range(150):
+                if i == 120:
+                    # Another connection already sees the first committed batch.
+                    visible_mid_fetch.append(Store(path).conn.execute("SELECT count(*) FROM jobs").fetchone()[0])
+                yield Job(source=self.name, source_id=str(i), url=f"https://example.com/{i}", title="QA Technician",
+                          company=f"Acme {i}", location="Toronto")
+
+    assert ingest(store, FakeSource(), CityMatcher(config.cities), config)["new"] == 150
+    assert visible_mid_fetch == [99]

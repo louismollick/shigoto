@@ -18,6 +18,7 @@ from shigoto.sources import Source, build_sources
 from shigoto.sources.jobspy_source import JobSpySource
 
 log = logging.getLogger(__name__)
+COMMIT_EVERY = 100
 
 
 def run_once(config: Config, *, sync_sheet: bool = True, only: set[str] | None = None) -> dict[str, int]:
@@ -60,6 +61,8 @@ def ingest(store: Store, source: Source, matcher: CityMatcher, config: Config) -
     try:
         for raw in source.fetch():
             stats[f"fetched_{source.name}"] += 1
+            if stats[f"fetched_{source.name}"] % COMMIT_EVERY == 0:
+                store.commit()  # Long sources (Job Bank's first search pass) must not hold the write lock for hours.
             snapshot = job_json(raw)
             job = normalize(raw, matcher, config.title_keywords, config.exclude_title_keywords,
                             config.exclude_companies)
