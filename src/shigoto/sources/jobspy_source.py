@@ -42,6 +42,8 @@ jobspy_indeed.job_search_query = include_exact_salary(jobspy_indeed.job_search_q
 
 # 403 is a bot challenge (ZipRecruiter on datacenter IPs); 429/999 are rate limits. All block the run.
 _BLOCKED = re.compile(r"\b(403|429|999)\b")
+_PROXY_ATTEMPTS = 3
+_PROXY_RETRY_SECONDS = 5
 
 
 class _BlockDetector(logging.Handler):
@@ -93,6 +95,9 @@ class JobSpySource:
             selected = [counter % len(queries)]
             start = counter % len(cities)
             cities = cities[start:] + cities[:start]
+        # A rotating proxy gives each request a new exit IP, so a block or dropped connection
+        # usually clears on retry. Direct requests share one IP, so they stop at the first block.
+        attempts = _PROXY_ATTEMPTS if self.site.use_proxy and proxy_url() else 1
         jobspy_logger.addHandler(detector)
         try:
             for group_index in selected:
@@ -118,13 +123,19 @@ class JobSpySource:
                 complete = True
                 for city in cities:
                     for query in group_queries:
-                        detector.failed = False
-                        try:
-                            jobs = list(self._search(query, city, hours_old, results_wanted))
-                        except Exception as error:
-                            detector.failed = True
-                            detector.blocked |= bool(_BLOCKED.search(str(error)))
-                            log.warning("%s %r in %s failed: %s", self.name, query, city.name, error)
+                        for attempt in range(attempts):
+                            detector.failed = detector.blocked = False
+                            try:
+                                jobs = list(self._search(query, city, hours_old, results_wanted))
+                            except Exception as error:
+                                detector.failed = True
+                                detector.blocked = bool(_BLOCKED.search(str(error)))
+                                log.warning("%s %r in %s failed: %s", self.name, query, city.name, error)
+                            if not detector.failed:
+                                break
+                            if attempt + 1 < attempts:
+                                log.info("%s %r in %s: retrying from a new proxy IP", self.name, query, city.name)
+                                time.sleep(_PROXY_RETRY_SECONDS)
                         if detector.failed:
                             complete = False
                             self.incomplete = True

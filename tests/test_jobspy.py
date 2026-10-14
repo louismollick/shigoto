@@ -269,3 +269,30 @@ def test_proxy_only_for_opted_in_sites(store: Store, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr("shigoto.sources.jobspy_source.scrape_jobs", scrape)
     list(source(store, JobSpySite(site="linkedin", use_proxy=use_proxy, delay_seconds=0)).fetch())
     assert proxies == [expected, expected]  # one search per term
+
+
+@pytest.mark.parametrize(("failures", "found"), [(2, True), (3, False)])
+def test_proxied_search_retries_blocks(store: Store, monkeypatch: pytest.MonkeyPatch, failures: int,
+                                       found: bool) -> None:
+    calls: list[object] = []
+
+    def scrape(**kwargs: object) -> pd.DataFrame:
+        calls.append(kwargs["search_term"])
+        if len(calls) <= failures:
+            logging.getLogger("JobSpy:LinkedIn").error("LinkedIn response status code 429")
+            return pd.DataFrame()
+        return pd.DataFrame([{"site": "linkedin", "id": f"li-{len(calls)}", "job_url": "https://example.com/1",
+                              "title": "QA technician"}])
+
+    monkeypatch.setenv("SHIGOTO_PROXY", "http://u:p@proxy:823")
+    monkeypatch.setattr("shigoto.sources.jobspy_source.scrape_jobs", scrape)
+    monkeypatch.setattr("shigoto.sources.jobspy_source.time.sleep", lambda _: None)
+    adapter = source(store, JobSpySite(site="linkedin", use_proxy=True, delay_seconds=0))
+    jobs = list(adapter.fetch())
+    if found:
+        # Two blocked attempts, then the first term succeeds and the second term runs normally.
+        assert calls == ["lab", "lab", "lab", "QA"] and [j.source_id for j in jobs] == ["li-3", "li-4"]
+        assert not adapter.incomplete
+    else:
+        # Three blocked attempts exhaust the retries and stop the source.
+        assert calls == ["lab", "lab", "lab"] and jobs == [] and adapter.incomplete

@@ -14,11 +14,14 @@ from shigoto.http import PoliteSession, RateLimited, proxy_url
 from shigoto.models import Liveness
 from shigoto.text import html_to_text
 
-# Retries are disabled: on a 429 we want to stop for this run, not hammer LinkedIn.
+# Direct requests share one IP, so a 429 stops LinkedIn for this run instead of hammering it.
+# Through a rotating proxy, closing each connection gives every request (and retry) a new exit IP.
 # Description fetches add their own configured delay on top of this floor.
 _session = PoliteSession(min_interval=10, retries=0)
 if proxy := proxy_url():
     _session.session.proxies = {"http": proxy, "https": proxy}
+    _session.session.headers["Connection"] = "close"
+    _session.retries = 2
 
 
 def linkedin_job_id(source_id: str) -> str:
