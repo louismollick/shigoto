@@ -63,9 +63,9 @@ def test_recency_full_sweep_and_missed_runs(store: Store, monkeypatch: pytest.Mo
 
 @pytest.mark.parametrize("failure", ["crash", "403", "429", "999", "500"])
 @pytest.mark.parametrize("raises", [False, True])
-def test_failed_pass_does_not_checkpoint_or_rotate(store: Store, monkeypatch: pytest.MonkeyPatch,
-                                                  caplog: pytest.LogCaptureFixture, failure: str,
-                                                  raises: bool) -> None:
+def test_failed_pass_does_not_checkpoint_but_still_rotates(store: Store, monkeypatch: pytest.MonkeyPatch,
+                                                         caplog: pytest.LogCaptureFixture, failure: str,
+                                                         raises: bool) -> None:
     site = JobSpySite(site="linkedin", query_groups=[["food safety"], ["microbiology"]], rotate_groups=True,
                       delay_seconds=0)
     key = "jobspy:linkedin:group:" + hashlib.sha1(b'"food safety"').hexdigest()[:16]
@@ -96,12 +96,21 @@ def test_failed_pass_does_not_checkpoint_or_rotate(store: Store, monkeypatch: py
     assert adapter.incomplete
     assert any(record.levelno == logging.WARNING and "pass incomplete" in record.message
                for record in caplog.records)
-    assert dict(store.conn.execute("SELECT key, value FROM meta WHERE key LIKE 'jobspy:%'")) == existing
-    # The next fetch retries the same group, and clears the previous pass's failure state.
-    calls.clear()
-    monkeypatch.setattr("shigoto.sources.jobspy_source.scrape_jobs", lambda **kwargs: pd.DataFrame())
+    # No checkpoint for the failed group, but rotation still advances so it can't starve the others.
+    assert dict(store.conn.execute("SELECT key, value FROM meta WHERE key LIKE 'jobspy:%'")) == (
+        existing | {"jobspy:linkedin:next_group": "1"})
+    # The next fetch moves to the next group, starts from the next city, and clears the failure state.
+    searches: list[tuple[object, object]] = []
+
+    def record(**kwargs: object) -> pd.DataFrame:
+        searches.append((kwargs["search_term"], kwargs["location"]))
+        return pd.DataFrame()
+
+    monkeypatch.setattr("shigoto.sources.jobspy_source.scrape_jobs", record)
     list(adapter.fetch())
-    assert not adapter.incomplete and store.get_meta("jobspy:linkedin:next_group") == "1"
+    assert searches == [("microbiology", "Ottawa, ON"), ("microbiology", "Vancouver, BC"),
+                        ("microbiology", "Toronto, ON")]
+    assert not adapter.incomplete and store.get_meta("jobspy:linkedin:next_group") == "2"
 
 
 def test_rotation_and_independent_group_checkpoints(store: Store, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,7 +130,7 @@ def test_rotation_and_independent_group_checkpoints(store: Store, monkeypatch: p
     assert [c["search_term"] for c in calls] == ['"food safety" OR QA', "microbiology", '"QC analyst"',
                                                '"food safety" OR QA']
     assert [c["hours_old"] for c in calls] == [None, None, None, 72]
-    assert store.get_meta("jobspy:linkedin:next_group") == "1"
+    assert store.get_meta("jobspy:linkedin:next_group") == "4"
     assert store.conn.execute("SELECT count(*) FROM meta WHERE key LIKE '%:last_success'").fetchone()[0] == 3
     # A different source has no checkpoint even after LinkedIn completed.
     list(source(store, JobSpySite(site="zip_recruiter", delay_seconds=0)).fetch())
@@ -241,3 +250,22 @@ def test_ingest_counts_incomplete_pass_and_keeps_successful_jobs(store: Store, m
     assert stats["fetched_indeed"] == stats["new"] == (1 if failure == "429" else 2)
     assert len(store.visible_jobs()) == stats["new"]
     assert store.get_meta("jobspy:indeed:last_success") is None
+
+
+@pytest.mark.parametrize(("use_proxy", "env", "expected"), [
+    (True, "http://u:p@proxy:823", "http://u:p@proxy:823"),
+    (True, "", None),
+    (False, "http://u:p@proxy:823", None),
+])
+def test_proxy_only_for_opted_in_sites(store: Store, monkeypatch: pytest.MonkeyPatch, use_proxy: bool,
+                                       env: str, expected: str | None) -> None:
+    proxies: list[object] = []
+
+    def scrape(**kwargs: object) -> pd.DataFrame:
+        proxies.append(kwargs["proxies"])
+        return pd.DataFrame()
+
+    monkeypatch.setenv("SHIGOTO_PROXY", env)
+    monkeypatch.setattr("shigoto.sources.jobspy_source.scrape_jobs", scrape)
+    list(source(store, JobSpySite(site="linkedin", use_proxy=use_proxy, delay_seconds=0)).fetch())
+    assert proxies == [expected, expected]  # one search per term

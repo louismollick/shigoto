@@ -15,6 +15,7 @@ import jobspy.indeed as jobspy_indeed
 
 from shigoto.config import City, JobSpySite
 from shigoto.db import Store, now_iso
+from shigoto.http import proxy_url
 from shigoto.models import Job
 from shigoto.text import clean, clean_description, parse_date
 
@@ -80,9 +81,18 @@ class JobSpySource:
         jobspy_logger = logging.getLogger(f"JobSpy:{_jobspy_logger_name(self.name)}")
         groups = self.site.query_groups
         queries = [build_queries(group, True) for group in groups] if groups else [self.terms]
-        rotation_key = f"jobspy:{self.name}:next_group"
-        index = int(self.store.get_meta(rotation_key) or "0") % len(queries)
-        selected = [index] if groups and self.site.rotate_groups else range(len(queries))
+        rotate = bool(groups) and self.site.rotate_groups
+        cities = self.cities
+        selected: list[int] | range = range(len(queries))
+        if rotate:
+            # Advance every run, even if this one gets blocked, so a failing group or city
+            # can't starve the rest. The counter also rotates which city goes first.
+            rotation_key = f"jobspy:{self.name}:next_group"
+            counter = int(self.store.get_meta(rotation_key) or "0")
+            self.store.set_meta(rotation_key, str(counter + 1))
+            selected = [counter % len(queries)]
+            start = counter % len(cities)
+            cities = cities[start:] + cities[:start]
         jobspy_logger.addHandler(detector)
         try:
             for group_index in selected:
@@ -106,7 +116,7 @@ class JobSpySource:
                 results_wanted = (self.site.full_sweep_results_wanted if full_sweep
                                   else self.site.results_wanted)
                 complete = True
-                for city in self.cities:
+                for city in cities:
                     for query in group_queries:
                         detector.failed = False
                         try:
@@ -130,8 +140,6 @@ class JobSpySource:
                 self.store.set_meta(f"{key}:last_success", started)
                 if full_sweep:
                     self.store.set_meta(f"{key}:last_full_sweep", started)
-                if groups and self.site.rotate_groups:
-                    self.store.set_meta(rotation_key, str((group_index + 1) % len(queries)))
         finally:
             jobspy_logger.removeHandler(detector)
 
@@ -144,6 +152,7 @@ class JobSpySource:
             hours_old=hours_old,
             country_indeed="Canada",
             description_format="markdown",
+            proxies=proxy_url() if self.site.use_proxy else None,
             verbose=1,
         )
         log.info("%s %r in %s: %d results", self.name, query[:40], city.name, len(df))

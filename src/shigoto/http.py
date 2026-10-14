@@ -7,6 +7,7 @@ Each adapter owns one `PoliteSession`, so `min_interval` acts as a per-host craw
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from collections.abc import Callable
@@ -24,6 +25,14 @@ BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 )
+
+
+def proxy_url() -> str | None:
+    """Residential proxy for sources that block datacenter IPs (LinkedIn, ZipRecruiter).
+
+    Set SHIGOTO_PROXY to e.g. `http://user:pass@host:port`; unset means direct requests.
+    """
+    return os.environ.get("SHIGOTO_PROXY") or None
 
 
 class RateLimited(Exception):

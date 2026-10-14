@@ -75,6 +75,7 @@ The `Closed` tab is read-only and built from two formulas. Widen both if reviewe
 | `SHIGOTO_DB` | `/data/shigoto.db` |
 | `SHIGOTO_CONFIG` | `/app/config.yaml` (mount your own to override) |
 | `CODEX_HOME` | `/data/codex` in Docker; `data/codex` locally |
+| `SHIGOTO_PROXY` | unset. Residential proxy URL (`http://user:pass@host:port`) for JobSpy sites with `use_proxy: true` and LinkedIn detail/closure fetches |
 
 ## Codex reviews
 

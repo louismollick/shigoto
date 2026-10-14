@@ -66,7 +66,8 @@ cities:
     aliases: [Kanata, Nepean, Orleans, Gloucester, Stittsville, Carleton Place, Kemptville, Arnprior, Rockland]
 
 # Recency widens after a missed/failed pass. Missing checkpoints trigger a full sweep.
-# LinkedIn rotates focused OR groups, one group across all cities per run, 90s apart.
+# LinkedIn rotates focused OR groups, one group across all cities per run, 90s apart; the first
+# city rotates too. LinkedIn and ZipRecruiter block datacenter IPs, so they use SHIGOTO_PROXY when set.
 # Indeed searches every term x city, with a weekly full sweep to catch indexing lag.
 jobspy:
   - site: indeed
@@ -84,12 +85,14 @@ jobspy:
       - [QC analyst, quality control analyst, chemistry technician, analytical chemist,
          environmental laboratory, environmental monitoring, quality associate]
     rotate_groups: true
+    use_proxy: true
     results_wanted: 50
     full_sweep_results_wanted: 50
     hours_old: 72
     delay_seconds: 90
   # Small per-term caps limit pagination; delays between searches reduce blocking risk.
   - site: zip_recruiter
+    use_proxy: true
     results_wanted: 20
     full_sweep_results_wanted: 20
     hours_old: 168
@@ -120,7 +123,8 @@ title_keywords: [microbiolog*, laborator*, lab, quality, QA, QC, FSQA, HACCP, fo
                  stability, validation, product develop*, R&D,
                  in vivo, OOS, GC, GCMS*, LCMS*, ICP*, spectro*, chromatograph*, SQF,
                  analyst*, assurance, sterility, QMS, testing, GMP, bioanalytic*, chemical technologist*,
-                 food inspector*, food inspection, preparation technician, diet technician]
+                 food inspector*, food inspection, preparation technician, diet technician,
+                 baking technolog*, regulatory affairs coordinator, sanitation facilities coordinator]
 
 # Then dropped if the title contains any of these (same matching rules). Seniority and part-time
 # titles are never a fit for her.

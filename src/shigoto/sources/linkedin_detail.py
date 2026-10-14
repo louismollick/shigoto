@@ -10,13 +10,15 @@ from __future__ import annotations
 import requests
 from bs4 import BeautifulSoup
 
-from shigoto.http import PoliteSession, RateLimited
+from shigoto.http import PoliteSession, RateLimited, proxy_url
 from shigoto.models import Liveness
 from shigoto.text import html_to_text
 
 # Retries are disabled: on a 429 we want to stop for this run, not hammer LinkedIn.
 # Description fetches add their own configured delay on top of this floor.
 _session = PoliteSession(min_interval=10, retries=0)
+if proxy := proxy_url():
+    _session.session.proxies = {"http": proxy, "https": proxy}
 
 
 def linkedin_job_id(source_id: str) -> str:

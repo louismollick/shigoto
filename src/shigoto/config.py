@@ -1,5 +1,5 @@
 """Typed app configuration, loaded from config.yaml plus env vars for secrets/paths:
-GOOGLE_APPLICATION_CREDENTIALS, SHIGOTO_SPREADSHEET_ID, SHIGOTO_DB."""
+GOOGLE_APPLICATION_CREDENTIALS, SHIGOTO_SPREADSHEET_ID, SHIGOTO_DB, SHIGOTO_PROXY (see http.proxy_url)."""
 
 from __future__ import annotations
 
@@ -37,6 +37,7 @@ class JobSpySite(BaseModel):
     full_sweep_days: int | None = Field(default=None, ge=1)
     full_sweep_results_wanted: int = Field(default=400, ge=1)
     delay_seconds: float = 2.0
+    use_proxy: bool = False  # route searches through SHIGOTO_PROXY when it's set
     enabled: bool = True
 
 
