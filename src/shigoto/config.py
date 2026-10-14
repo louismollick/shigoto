@@ -46,6 +46,9 @@ class DescriptionFetch(BaseModel):
 
     linkedin_max_per_run: int = 25
     linkedin_delay_seconds: float = 10.0
+    # Used instead when SHIGOTO_PROXY is set: each request gets a fresh IP.
+    linkedin_proxied_max_per_run: int = 100
+    linkedin_proxied_delay_seconds: float = 2.0
     jobbank_max_per_run: int = 60
 
 

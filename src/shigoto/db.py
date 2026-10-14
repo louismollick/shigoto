@@ -284,14 +284,16 @@ class Store:
         ).fetchall()
         return [DescriptionTarget(r["job_id"], r["source_id"], r["url"]) for r in rows]
 
-    def set_description(self, job_id: str, description: str, now: str) -> None:
+    def set_description(self, job_id: str, description: str, now: str, salary: str = "") -> None:
+        """Store a fetched description. A detail-page salary only fills an empty salary."""
         row = self.conn.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        salary = row["salary"] or salary
         h = content_hash(row["title"], description, company=row["company"], city=row["city"],
-                         location=row["location"], salary=row["salary"], job_type=row["job_type"])
+                         location=row["location"], salary=salary, job_type=row["job_type"])
         self.conn.execute(
-            """UPDATE jobs SET description=?, description_checked_at=?, content_hash=?,
+            """UPDATE jobs SET description=?, salary=?, description_checked_at=?, content_hash=?,
                updated_at=CASE WHEN content_hash != ? THEN ? ELSE updated_at END WHERE job_id=?""",
-            (description, now, h, h, now, job_id),
+            (description, salary, now, h, h, now, job_id),
         )
         self.conn.commit()
 

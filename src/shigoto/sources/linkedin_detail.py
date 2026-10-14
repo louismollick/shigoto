@@ -15,12 +15,13 @@ from shigoto.models import Liveness
 from shigoto.text import html_to_text
 
 # Direct requests share one IP, so a 429 stops LinkedIn for this run instead of hammering it.
-# Through a rotating proxy, closing each connection gives every request (and retry) a new exit IP.
-# Description fetches add their own configured delay on top of this floor.
+# Through a rotating proxy, closing each connection gives every request (and retry) a new exit IP,
+# so per-IP pacing matters much less. Description fetches add their configured delay on top.
 _session = PoliteSession(min_interval=10, retries=0)
 if proxy := proxy_url():
     _session.session.proxies = {"http": proxy, "https": proxy}
     _session.session.headers["Connection"] = "close"
+    _session.min_interval = 2
     _session.retries = 2
 
 
@@ -32,10 +33,13 @@ def posting_url(source_id: str) -> str:
     return f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{linkedin_job_id(source_id)}"
 
 
-def fetch_description(source_id: str) -> str:
-    page = _session.get_text(posting_url(source_id))
-    block = BeautifulSoup(page, "html.parser").select_one(".show-more-less-html__markup")
-    return html_to_text(str(block)) if block else ""
+def fetch_description(source_id: str) -> tuple[str, str]:
+    """Return (description, salary). Salary is LinkedIn's "Base pay range" box, which sits
+    outside the description, e.g. "CA$20.55/hr - CA$26.00/hr"; empty when not shown."""
+    soup = BeautifulSoup(_session.get_text(posting_url(source_id)), "html.parser")
+    block = soup.select_one(".show-more-less-html__markup")
+    pay = soup.select_one(".compensation__salary")
+    return (html_to_text(str(block)) if block else "", pay.get_text(" ", strip=True) if pay else "")
 
 
 def check_liveness(url: str, source_id: str) -> Liveness:

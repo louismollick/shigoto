@@ -121,7 +121,7 @@ def test_jobbank_unrecognized_detail_stays_pending_and_next_target_survives(stor
             raise ValueError('no recognized posting content')
         return ''
 
-    assert enrich._enrich(store, 'jobbank', 60, lambda target: fetch(target.url), delay=0) == 1
+    assert enrich._enrich(store, 'jobbank', 60, lambda target: (fetch(target.url), ''), delay=0) == 1
     rows = {r['job_id']: r for r in store.conn.execute('SELECT * FROM jobs')}
     assert rows[pending]['description_checked_at'] is None
     assert rows[external]['description_checked_at']
@@ -131,8 +131,48 @@ def test_jobbank_robots_failure_leaves_targets_pending(store: Store) -> None:
     add_job(store, 'jobbank', '1')
     add_job(store, 'jobbank', '2')
 
-    def fetch(target: DescriptionTarget) -> str:
+    def fetch(target: DescriptionTarget) -> tuple[str, str]:
         raise RobotsDisallowed('disallowed')
 
     assert enrich._enrich(store, 'jobbank', 60, fetch, delay=0) == 0
     assert len(store.missing_descriptions('jobbank', 60)) == 2
+
+
+def test_linkedin_salary_fills_empty_salary_only(store: Store) -> None:
+    empty = add_job(store, 'linkedin', 'empty')
+    known = add_job(store, 'linkedin', 'known')
+    store.conn.execute("UPDATE jobs SET salary='$60,000' WHERE job_id=?", (known,))
+    assert enrich._enrich(store, 'linkedin', 10, lambda t: ('QA duties.', 'CA$20.55/hr - CA$26.00/hr'),
+                          delay=0) == 2
+    rows = {r['job_id']: r for r in store.conn.execute('SELECT * FROM jobs')}
+    assert rows[empty]['salary'] == 'CA$20.55/hr - CA$26.00/hr'
+    assert rows[known]['salary'] == '$60,000'
+
+
+def test_proxied_linkedin_failure_skips_to_next_job(store: Store) -> None:
+    first = add_job(store, 'linkedin', 'first')
+    second = add_job(store, 'linkedin', 'second')
+
+    def fetch(target: DescriptionTarget) -> tuple[str, str]:
+        if target.job_id == first:
+            raise RateLimited('429')
+        return 'QA duties.', ''
+
+    assert enrich._enrich(store, 'linkedin', 10, fetch, delay=0, stop_on_failure=False) == 1
+    rows = {r['job_id']: r for r in store.conn.execute('SELECT * FROM jobs')}
+    assert rows[first]['description_checked_at'] is None  # retried next run
+    assert rows[second]['description'] == 'QA duties.'
+
+
+def test_linkedin_detail_reads_description_and_pay_box(monkeypatch: MonkeyPatch) -> None:
+    from shigoto.sources import linkedin_detail
+    page = """<div class="compensation__salary-range"><h3 class="compensation__heading">Base pay range</h3>
+      <div class="salary compensation__salary">
+        CA$20.55/hr - CA$26.00/hr
+      </div></div>
+      <div class="show-more-less-html__markup"><p>Perform QA checks.</p></div>"""
+    monkeypatch.setattr(linkedin_detail._session, 'get_text', lambda url: page)
+    assert linkedin_detail.fetch_description('li-1') == ('Perform QA checks.', 'CA$20.55/hr - CA$26.00/hr')
+    monkeypatch.setattr(linkedin_detail._session, 'get_text',
+                        lambda url: '<div class="show-more-less-html__markup">No pay.</div>')
+    assert linkedin_detail.fetch_description('li-1') == ('No pay.', '')
