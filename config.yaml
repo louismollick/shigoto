@@ -87,7 +87,10 @@ jobspy:
     rotate_groups: true
     use_proxy: true
     results_wanted: 50
-    full_sweep_results_wanted: 50
+    # Weekly deep sweep per group: a 300-result probe found 127 unknown filter-passing postings
+    # (Mérieux, DECIEM, Factor_) that the 50-result sweep and Indeed never reached.
+    full_sweep_days: 7
+    full_sweep_results_wanted: 300
     hours_old: 72
     delay_seconds: 90
   # Small per-term caps limit pagination; delays between searches reduce blocking risk.
