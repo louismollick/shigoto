@@ -15,7 +15,7 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from importlib.resources import files
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -231,6 +231,15 @@ def input_hash(group: list[ReviewJob]) -> str:
                                     sort_keys=True).encode()).hexdigest()
 
 
+# Detail fetches usually fill a blank description within a run or two. Wait that long
+# rather than judge a title alone; after it, review anyway so nothing waits forever.
+DESCRIPTION_GRACE = timedelta(hours=24)
+
+
+def awaiting_description(job: ReviewJob, now: datetime) -> bool:
+    return not job.values["Description"].strip() and now - job.updated_at < DESCRIPTION_GRACE
+
+
 def needs_review(store: Store, job: ReviewJob, fingerprint: str, policy: str) -> bool:
     try:
         if timestamp(job.values["AI Reviewed At"]) < job.updated_at:
@@ -381,7 +390,8 @@ def write_fields(ws: ReviewSheet, job: ReviewJob, fields: AIFields) -> None:
 
 def review_rows(store: Store, ws: gspread.Worksheet, config: ReviewConfig, *, dry_run: bool = False,
                 job_id: str | None = None, limit: int | None = None,
-                judge: Callable[[ReviewJob, list[ReviewJob], ReviewConfig], Judgment] = run_codex) -> ReviewReport:
+                judge: Callable[[ReviewJob, list[ReviewJob], ReviewConfig], Judgment] = run_codex,
+                now: datetime | None = None) -> ReviewReport:
     """Prepare all judgments before publishing each selected row with its own call."""
     if store.sheet_rebuild_pending():
         raise RuntimeError("Finish the interrupted Sheet sync before reviewing jobs")
@@ -395,7 +405,10 @@ def review_rows(store: Store, ws: gspread.Worksheet, config: ReviewConfig, *, dr
     fingerprints = {job.job_id: input_hash(groups[group_key(job)]) for job in jobs}
     eligible = [job for job in jobs if needs_review(store, job, fingerprints[job.job_id], policy)]
     report.pending = len(eligible) + len(report.failures)
-    selected = sorted((job for job in eligible if job_id is None or job.job_id == job_id),
+    now = now or datetime.now(timezone.utc)
+    # Still pending, so counted above; an explicit job_id is reviewed regardless.
+    selected = sorted((job for job in eligible if job.job_id == job_id
+                       or (job_id is None and not awaiting_description(job, now))),
                       key=lambda job: (job.updated_at, job.job_id), reverse=True)
     selected = selected[:limit if limit is not None else config.max_per_run]
     if job_id is not None and not any(job.job_id == job_id for job in jobs):
