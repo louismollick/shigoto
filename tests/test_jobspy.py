@@ -294,5 +294,27 @@ def test_proxied_search_retries_blocks(store: Store, monkeypatch: pytest.MonkeyP
         assert calls == ["lab", "lab", "lab", "QA"] and [j.source_id for j in jobs] == ["li-3", "li-4"]
         assert not adapter.incomplete
     else:
-        # Three blocked attempts exhaust the retries and stop the source.
-        assert calls == ["lab", "lab", "lab"] and jobs == [] and adapter.incomplete
+        # Three blocked attempts exhaust the retries; the pass is incomplete but the next term still runs.
+        assert calls == ["lab", "lab", "lab", "QA"] and [j.source_id for j in jobs] == ["li-4"]
+        assert adapter.incomplete
+
+
+def test_proxied_search_keeps_partial_rows_across_attempts(store: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    def scrape(**kwargs: object) -> pd.DataFrame:
+        nonlocal calls
+        calls += 1
+        # Each attempt gets a few pages before a 429; later attempts overlap earlier ones.
+        logging.getLogger("JobSpy:LinkedIn").error("LinkedIn response status code 429")
+        ids = {1: [1, 2], 2: [1, 2, 3], 3: [1]}.get(calls, [])
+        return pd.DataFrame([{"site": "linkedin", "id": f"li-{i}", "job_url": f"https://example.com/{i}",
+                              "title": "QA technician"} for i in ids])
+
+    monkeypatch.setenv("SHIGOTO_PROXY", "http://u:p@proxy:823")
+    monkeypatch.setattr("shigoto.sources.jobspy_source.scrape_jobs", scrape)
+    monkeypatch.setattr("shigoto.sources.jobspy_source.time.sleep", lambda _: None)
+    adapter = JobSpySource(JobSpySite(site="linkedin", use_proxy=True, delay_seconds=0), ["lab"],
+                           [City(name="Toronto", jobspy_location="Toronto, ON")], store)
+    assert sorted(j.source_id for j in adapter.fetch()) == ["li-1", "li-2", "li-3"]
+    assert adapter.incomplete and store.get_meta("jobspy:linkedin:last_success") is None

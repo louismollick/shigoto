@@ -95,9 +95,11 @@ class JobSpySource:
             selected = [counter % len(queries)]
             start = counter % len(cities)
             cities = cities[start:] + cities[:start]
-        # A rotating proxy gives each request a new exit IP, so a block or dropped connection
-        # usually clears on retry. Direct requests share one IP, so they stop at the first block.
-        attempts = _PROXY_ATTEMPTS if self.site.use_proxy and proxy_url() else 1
+        # A rotating proxy gives each connection a new exit IP, so a block or dropped connection
+        # usually clears on retry, and one blocked city says nothing about the next. Direct
+        # requests share one IP, so they stop at the first block.
+        proxied = self.site.use_proxy and proxy_url() is not None
+        attempts = _PROXY_ATTEMPTS if proxied else 1
         jobspy_logger.addHandler(detector)
         try:
             for group_index in selected:
@@ -123,10 +125,14 @@ class JobSpySource:
                 complete = True
                 for city in cities:
                     for query in group_queries:
+                        # Union of every attempt's rows: a deep search is ~30 pages on one connection,
+                        # so a proxied attempt often ends early with a 429 but its rows are still real.
+                        found: dict[str, Job] = {}
                         for attempt in range(attempts):
                             detector.failed = detector.blocked = False
                             try:
-                                jobs = list(self._search(query, city, hours_old, results_wanted))
+                                for job in self._search(query, city, hours_old, results_wanted):
+                                    found.setdefault(job.source_id, job)
                             except Exception as error:
                                 detector.failed = True
                                 detector.blocked = bool(_BLOCKED.search(str(error)))
@@ -139,12 +145,17 @@ class JobSpySource:
                         if detector.failed:
                             complete = False
                             self.incomplete = True
-                            log.warning("%s %r in %s skipped; pass incomplete%s", self.name, query, city.name,
-                                        " (rate limited, stopping source)" if detector.blocked else "")
-                            if detector.blocked:
-                                return
-                        else:
-                            yield from jobs
+                            if not proxied:
+                                # Direct requests share one IP: drop partial rows, and stop on a block.
+                                log.warning("%s %r in %s skipped; pass incomplete%s", self.name, query, city.name,
+                                            " (rate limited, stopping source)" if detector.blocked else "")
+                                if detector.blocked:
+                                    return
+                                time.sleep(self.site.delay_seconds)
+                                continue
+                            log.warning("%s %r in %s incomplete; keeping %d partial results", self.name, query,
+                                        city.name, len(found))
+                        yield from found.values()
                         time.sleep(self.site.delay_seconds)
                 if not complete:
                     continue
