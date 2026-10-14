@@ -1,5 +1,4 @@
 import json
-from datetime import datetime
 import subprocess
 import time
 from collections.abc import Callable
@@ -481,18 +480,14 @@ def test_review_config_allows_batches_above_forty() -> None:
         ReviewConfig(max_per_run=0)
 
 
-def test_blank_description_waits_up_to_a_day(tmp_path: Path) -> None:
-    sheet = Worksheet([record("fresh", Description="", **{"Updated At": "2026-10-08T10:00:00-05:00"}),
-                       record("stale", Description="", **{"Updated At": "2026-10-07T09:00:00-05:00"}),
-                       record("described", **{"Updated At": "2026-10-08T09:00:00-05:00"})])
+
+def test_blank_description_is_never_reviewed(tmp_path: Path) -> None:
+    sheet = Worksheet([record("blank", Description="  "), record("described")])
     judged: list[str] = []
 
     def judge(job: ReviewJob, group: list[ReviewJob], config: ReviewConfig) -> Judgment:
         judged.append(job.job_id)
         return judgment(job.job_id)
 
-    report = review_rows(Store(tmp_path / "t.db"), cast(gspread.Worksheet, sheet), ReviewConfig(), judge=judge,
-                         now=datetime.fromisoformat("2026-10-08T12:00:00-05:00"))
-    # "fresh" may still get its description fetched; "stale" has waited over 24 hours.
-    assert judged == ["described", "stale"]
-    assert report.pending == 1  # "fresh" stays queued for a later run
+    report = run(Store(tmp_path / "t.db"), sheet, judge=judge)
+    assert judged == ["described"] and report.pending == 0
