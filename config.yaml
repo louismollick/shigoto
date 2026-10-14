@@ -2,6 +2,7 @@
 
 interval_hours: 6
 liveness_max_per_run: 40  # per-posting closure checks per run; Indeed batch checks are free
+max_posting_age_days: 180  # hide older dated postings; keep undated jobs; null disables the limit
 
 # Runs after a successful Sheet sync. Authenticate Codex once in its persistent CODEX_HOME.
 review:

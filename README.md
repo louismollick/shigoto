@@ -66,6 +66,8 @@ The `Closed` tab is read-only and built from two formulas. Widen both if reviewe
 
 `config.yaml` holds search terms, cities (with suburb aliases), JobSpy settings, employer boards and keyword filters. Env vars:
 
+`max_posting_age_days: 180` hides postings older than roughly six months using the source-reported `Posted` date, including jobs already stored. The boundary date is included and undated jobs stay eligible. Use `365` for one year or `null` to disable the limit; omitted settings also disable it. The cutoff advances on each run or sync, before AI review. Hidden jobs retain their IDs, source history and reviews in SQLite and return to the sheet if the limit is relaxed. This does not mark them closed. Run `shigoto reprocess` to apply a changed limit to the sheet immediately without AI reviews.
+
 | Var | Default (Docker) |
 | --- | --- |
 | `GOOGLE_APPLICATION_CREDENTIALS` | `/secrets/google.json` (service account with edit access to the sheet) |

@@ -332,6 +332,47 @@ def test_company_exclusions_hide_and_restore_without_losing_reviews(tmp_path: Pa
     assert store.reviews()[saved.job_id] == {"Notes": "Keep this"}
 
 
+def test_posting_age_boundary_and_rolling_cutoff(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    config = config_for(tmp_path / "t.db")
+    config.max_posting_age_days = 180
+    for source_id, posted in [("old", date(2023, 1, 1)), ("before", date(2026, 4, 16)),
+                              ("boundary", date(2026, 4, 17)), ("new", date(2026, 10, 14)),
+                              ("undated", None), ("future", date(2026, 10, 15))]:
+        store.upsert(job(source_id=source_id, company=source_id, posted_date=posted), "t1")
+    store.commit()
+    assert store.reevaluate_exclusions(config, "2026-10-14T23:00:00-05:00") == 2
+    assert {j.company for j in store.visible_jobs()} == {"boundary", "new", "undated", "future"}
+    assert store.reevaluate_exclusions(config, "2026-10-15T00:00:00-05:00") == 3
+    assert {j.company for j in store.visible_jobs()} == {"new", "undated", "future"}
+
+
+@pytest.mark.parametrize("relaxed", [365, None])
+def test_posting_age_restoration_preserves_history_and_reviews(tmp_path: Path, relaxed: int | None) -> None:
+    store = Store(tmp_path / "t.db")
+    posting = job(posted_date=date(2026, 1, 1))
+    store.upsert(posting, "2026-10-01T12:00:00+00:00", raw=job_json(posting))
+    store.commit()
+    [saved] = store.visible_jobs()
+    store.backup_reviews(["AI Score", "Notes"], {saved.job_id: {"AI Score": "80", "Notes": "Keep"}}, "t1")
+    store.record_liveness(saved.job_id, "gone", "2026-10-04T12:00:00+00:00")
+    before = dict(store.conn.execute("SELECT * FROM jobs").fetchone())
+    sources = [tuple(row) for row in store.conn.execute("SELECT * FROM job_sources")]
+    config = config_for(tmp_path / "t.db")
+    config.max_posting_age_days = 180
+    assert store.reevaluate_exclusions(config, "2026-10-14T12:00:00+00:00") == 1
+    assert store.visible_jobs() == []
+    assert store.reevaluate_exclusions(config, "2026-10-15T12:00:00+00:00") == 1
+    assert store.conn.execute("SELECT excluded_at FROM jobs").fetchone()[0] == "2026-10-14T12:00:00+00:00"
+    config.max_posting_age_days = relaxed
+    assert store.reevaluate_exclusions(config, "2026-10-15T12:00:00+00:00") == 0
+    assert dict(store.conn.execute("SELECT * FROM jobs").fetchone()) == before
+    assert [tuple(row) for row in store.conn.execute("SELECT * FROM job_sources")] == sources
+    assert store.reviews()[saved.job_id] == {"AI Score": "80", "Notes": "Keep"}
+    [restored] = store.visible_jobs()
+    assert restored.job_id == saved.job_id and restored.status == "Closed"
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 def test_unrelated_employers_with_shared_words_stay_separate(tmp_path: Path, reverse: bool) -> None:
     store = Store(tmp_path / "t.db")

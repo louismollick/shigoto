@@ -104,6 +104,7 @@ class Config(BaseModel):
     title_keywords: list[str]  # a job's title must contain one (word-prefix match)
     exclude_title_keywords: list[str] = Field(default_factory=list)
     exclude_companies: list[str] = Field(default_factory=list)
+    max_posting_age_days: int | None = Field(default=None, ge=1)
     descriptions: DescriptionFetch = Field(default_factory=DescriptionFetch)
     sheet: SheetConfig
     liveness_max_per_run: int = Field(default=40, ge=0)

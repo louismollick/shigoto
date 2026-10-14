@@ -59,6 +59,42 @@ def test_run_without_sheet_reapplies_filters_to_history(tmp_path: Path, monkeypa
     store.close()
 
 
+def test_run_hides_new_old_posting_and_reprocess_can_restore_it(tmp_path: Path,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    config = config_for(tmp_path / "t.db")
+    config.max_posting_age_days = 180
+    posting = Job(source="indeed", source_id="old", url="https://example.com/old", title="QA Technician",
+                  company="Acme", location="Toronto", posted_date=date(2025, 10, 1))
+
+    class FakeSource:
+        name = "indeed"
+
+        def fetch(self) -> Iterator[Job]:
+            yield job_from_json(job_json(posting))
+
+    now = "2026-10-14T12:00:00-05:00"
+    monkeypatch.setattr("shigoto.pipeline.now_iso", lambda: now)
+    monkeypatch.setattr("shigoto.pipeline.build_sources", lambda *args: [FakeSource()])
+    monkeypatch.setattr("shigoto.pipeline.enrich_descriptions", lambda *args: {})
+    monkeypatch.setattr("shigoto.pipeline.check_liveness", lambda *args: {})
+    stats = run_once(config, sync_sheet=False)
+    assert stats["new"] == stats["sheet_hidden"] == 1
+    store = Store(config.db_path)
+    assert store.visible_jobs() == []
+    row = store.conn.execute("SELECT job_id, first_seen, last_seen FROM jobs").fetchone()
+    saved_id = row["job_id"]
+    assert row["first_seen"] == row["last_seen"] == now
+    assert store.conn.execute("SELECT raw FROM job_sources").fetchone()[0] == job_json(posting)
+    store.close()
+    config.max_posting_age_days = None
+    assert reprocess(config, sync_sheet=False)["sheet_hidden"] == 0
+    store = Store(config.db_path)
+    [restored] = store.visible_jobs()
+    assert restored.job_id == saved_id and restored.posted_date == "2025-10-01"
+    assert restored.first_seen == restored.updated_at == now
+    store.close()
+
+
 def test_known_rejected_posting_keeps_latest_fields_and_raw_for_replay(tmp_path: Path) -> None:
     path = tmp_path / "t.db"
     config = config_for(path)
