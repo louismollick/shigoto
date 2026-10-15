@@ -172,6 +172,7 @@ def test_old_schema_migration_is_idempotent(tmp_path: Path) -> None:
         conn.execute("ALTER TABLE jobs DROP COLUMN closed_at")
         conn.execute("ALTER TABLE jobs DROP COLUMN liveness_checked_at")
         conn.execute("ALTER TABLE jobs DROP COLUMN excluded_at")
+        conn.execute("ALTER TABLE jobs DROP COLUMN description_attempted_at")
         conn.execute("ALTER TABLE job_sources DROP COLUMN raw")
         conn.execute("ALTER TABLE jobs ADD COLUMN synced_hash TEXT")
         conn.execute("ALTER TABLE jobs ADD COLUMN synced_at TEXT")
@@ -180,10 +181,11 @@ def test_old_schema_migration_is_idempotent(tmp_path: Path) -> None:
     for _ in range(2):
         migrated = Store(path)
         columns = {row["name"] for row in migrated.conn.execute("PRAGMA table_info(jobs)")}
-        assert {"closed_at", "liveness_checked_at", "excluded_at", "synced_hash", "synced_at"} <= columns
+        assert {"closed_at", "liveness_checked_at", "excluded_at", "description_attempted_at", "synced_hash", "synced_at"} <= columns
         assert "raw" in {r["name"] for r in migrated.conn.execute("PRAGMA table_info(job_sources)")}
         row = migrated.conn.execute("SELECT * FROM jobs").fetchone()
         assert row["job_id"] == stored.job_id and row["closed_at"] is None
+        assert row["description_attempted_at"] is None
         assert row["content_hash"] == stored.content_hash
         assert row["updated_at"] == "2026-10-01T12:00:00+00:00"
         assert migrated.upsert(job(), "2026-10-02T12:00:00+00:00") == "seen"

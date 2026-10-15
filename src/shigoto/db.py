@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     last_seen TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     description_checked_at TEXT,
+    description_attempted_at TEXT,
     ai_reviewed_at TEXT,
     closed_at TEXT,
     liveness_checked_at TEXT,
@@ -165,7 +166,7 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(jobs)")}
-        for column in ("closed_at", "liveness_checked_at", "excluded_at"):
+        for column in ("closed_at", "liveness_checked_at", "excluded_at", "description_attempted_at"):
             if column not in columns:
                 self.conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
         source_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(job_sources)")}
@@ -275,14 +276,20 @@ class Store:
                                  (cutoff,)).rowcount
 
     def missing_descriptions(self, source: str, limit: int) -> list[DescriptionTarget]:
-        """Newest jobs with no description that `source` could describe, never tried before."""
+        """Pending descriptions for `source`: untried newest first, then oldest failed attempts."""
         rows = self.conn.execute(
             """SELECT j.job_id, s.source_id, s.url FROM jobs j JOIN job_sources s ON s.job_id = j.job_id
                WHERE s.source=? AND j.description='' AND j.description_checked_at IS NULL
-               GROUP BY j.job_id ORDER BY j.first_seen DESC LIMIT ?""",
+               GROUP BY j.job_id ORDER BY j.description_attempted_at IS NOT NULL,
+                   j.description_attempted_at, j.first_seen DESC LIMIT ?""",
             (source, limit),
         ).fetchall()
         return [DescriptionTarget(r["job_id"], r["source_id"], r["url"]) for r in rows]
+
+    def record_description_attempt(self, job_id: str, now: str) -> None:
+        """Move a failed fetch behind other pending descriptions without marking it checked."""
+        self.conn.execute("UPDATE jobs SET description_attempted_at=? WHERE job_id=?", (now, job_id))
+        self.conn.commit()
 
     def set_description(self, job_id: str, description: str, now: str, salary: str = "") -> None:
         """Store a fetched description. A detail-page salary only fills an empty salary."""

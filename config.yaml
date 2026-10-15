@@ -115,6 +115,8 @@ descriptions:
   linkedin_max_per_run: 25
   linkedin_delay_seconds: 10
   jobbank_max_per_run: 60
+  ziprecruiter_max_per_run: 25
+  ziprecruiter_delay_seconds: 2
 
 # Every job's title must contain one of these (case/accent-insensitive, whole word; trailing * = prefix).
 # This is the main relevance filter: Indeed and Workday also match descriptions, so "food safety"
