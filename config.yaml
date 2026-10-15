@@ -132,18 +132,17 @@ title_keywords: [microbiolog*, laborator*, lab, quality, QA, QC, FSQA, HACCP, fo
                  baking technolog*, regulatory affairs coordinator, sanitation facilities coordinator]
 
 # Then dropped if the title contains any of these (same matching rules). Seniority and part-time
-# titles are never a fit for her. The academic, research-scientist, trades and business groups never
-# scored 55+ across ~2,000 AI reviews (Oct 2026); bare "scientist", geotechnical/civil lab and
-# pathology/hematology titles stay, since some of those did.
+# titles are never a fit for her. The rest never scored 55+ across ~2,000 AI reviews (Oct 2026).
+# Prefer specific roles over broad fields: lab/QC titles can include construction, business,
+# SAP, mechanical, pathology or scientist levels, and recall takes priority.
 exclude_title_keywords: [software, SDET, tester, game, games, QA automation, test automation, web developer,
                          full stack, frontend, backend, devops, dental, IT, bilingue, French,
                          senior, sr, manager, director, supervisor, principal, engineer*, engineering,
                          student, co-op, intern, internship, casual, part time, part-time,
-                         research scientist, data scientist, scientist II, scientist III,
-                         postdoc*, post-doc*, fellow, fellowship, instructor*, tutor, tutors, sessional,
-                         professor, lecturer, research chair, cytogen*,
-                         construction, electrical, mechanical, automotive, aerospace, welding,
-                         systems testing, system testing, business, financ*, AI, SAP, marketing]
+                         data scientist, research scientist, postdoc*, post-doc*, professor, lecturer,
+                         research chair, instructor*, tutor, tutors, electrical, automotive, aerospace, welding,
+                         systems testing, system testing, business analyst, financial analyst, finance analyst,
+                         marketing analyst, marketing coordinator]
 
 # Jobs from these employers are hidden (same matching rules, against the company name).
 exclude_companies: []
