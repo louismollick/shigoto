@@ -41,7 +41,7 @@ def enrich_descriptions(store: Store, config: Config) -> dict[str, int]:
                                     delay=0),
         "described_zip_recruiter": _enrich(
             store, "zip_recruiter", d.ziprecruiter_max_per_run,
-            lambda t: ziprecruiter_detail.fetch_description(t.url),
+            lambda t: ziprecruiter_detail.fetch_description(t.url, delay=d.ziprecruiter_delay_seconds),
             delay=d.ziprecruiter_delay_seconds, stop_on_failure=False,
         ) if proxied else 0,
     }
@@ -51,7 +51,12 @@ def _enrich(store: Store, source: str, limit: int, fetch: Callable[[DescriptionT
             delay: float, stop_on_failure: bool = True) -> int:
     """`fetch` returns (description, salary). Failed jobs stay unchecked and rotate behind other pending jobs."""
     done = 0
+    attempted = 0
     for target in store.missing_descriptions(source, limit):
+        # Pace the next job after every outcome, including blocked or unrecognized pages.
+        if attempted and delay:
+            time.sleep(delay + random.uniform(0, delay / 2))
+        attempted += 1
         salary = ""
         try:
             description, salary = fetch(target)
@@ -66,7 +71,7 @@ def _enrich(store: Store, source: str, limit: int, fetch: Callable[[DescriptionT
             status = e.response.status_code if e.response is not None else 0
             if status not in (404, 410):
                 store.record_description_attempt(target.job_id, now_iso())
-                log.warning("%s description fetch got HTTP %s%s", source, status,
+                log.warning("%s job %s description fetch got HTTP %s%s", source, target.job_id, status,
                             "; stopping for this run" if stop_on_failure else "")
                 if stop_on_failure:
                     break
@@ -89,7 +94,5 @@ def _enrich(store: Store, source: str, limit: int, fetch: Callable[[DescriptionT
             continue
         store.set_description(target.job_id, description, now_iso(), salary)
         done += 1
-        if delay:
-            time.sleep(delay + random.uniform(0, delay / 2))
-    log.info("%s: fetched %d descriptions", source, done)
+    log.info("%s: completed %d of %d description jobs", source, done, attempted)
     return done

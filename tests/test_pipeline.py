@@ -50,7 +50,11 @@ def test_run_without_sheet_reapplies_filters_to_history(tmp_path: Path, monkeypa
     store.commit()
     store.close()
     monkeypatch.setattr("shigoto.pipeline.build_sources", lambda config, matcher, store: [])
-    monkeypatch.setattr("shigoto.pipeline.enrich_descriptions", lambda store, config: {})
+    def enrich_only_eligible(store: Store, config: Config) -> dict[str, int]:
+        assert store.missing_descriptions("indeed", 25) == []
+        return {}
+
+    monkeypatch.setattr("shigoto.pipeline.enrich_descriptions", enrich_only_eligible)
     monkeypatch.setattr("shigoto.pipeline.check_liveness", lambda store, config: {})
     assert run_once(config, sync_sheet=False) == {"sheet_hidden": 1}
     store = Store(path)

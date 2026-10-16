@@ -59,6 +59,19 @@ def test_description_enrichment_targets(tmp_path: Path) -> None:
     assert store.visible_jobs()[0].description == "Now described"
 
 
+def test_description_queue_skips_hidden_and_closed_jobs_without_using_the_limit(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    for source_id in ("open", "excluded", "closed"):
+        store.upsert(job(source="zip_recruiter", source_id=source_id, description="", title=source_id), "t1")
+    store.conn.execute("UPDATE jobs SET excluded_at='t2' WHERE title='excluded'")
+    store.conn.execute("UPDATE jobs SET closed_at='t2' WHERE title='closed'")
+    store.commit()
+    assert [target.source_id for target in store.missing_descriptions("zip_recruiter", 1)] == ["open"]
+    store.conn.execute("UPDATE jobs SET excluded_at=NULL, closed_at=NULL")
+    store.commit()
+    assert len(store.missing_descriptions("zip_recruiter", 3)) == 3
+
+
 @pytest.mark.parametrize("source", sorted(FULL_LISTING_SOURCES))
 def test_board_job_needs_confirmed_closure(tmp_path: Path, source: str) -> None:
     store = Store(tmp_path / "t.db")

@@ -18,13 +18,19 @@ from shigoto.sources import gcjobs, ziprecruiter_detail
 NOW = '2026-10-13T00:00:00+00:00'
 
 
+@pytest.fixture(autouse=True)
+def no_real_waits(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr('shigoto.enrich.time.sleep', lambda seconds: None)
+
+
 @pytest.fixture
 def store(tmp_path: Path) -> Store:
     return Store(tmp_path / 'jobs.db')
 
 
 def add_job(store: Store, source: str, source_id: str, description: str = '') -> str:
-    store.upsert(Job(source=source, source_id=source_id, url=f'https://example.com/{source_id}',
+    url = f'https://www.ziprecruiter.com/job/{source_id}' if source == 'zip_recruiter' else f'https://example.com/{source_id}'
+    store.upsert(Job(source=source, source_id=source_id, url=url,
                      title=f'Lab technician {source_id}', company='Acme', location='Toronto',
                      city='Toronto', description=description), NOW)
     store.commit()
@@ -168,6 +174,30 @@ def test_proxied_linkedin_failure_skips_to_next_job(store: Store) -> None:
     assert rows[second]['description'] == 'QA duties.'
 
 
+@pytest.mark.parametrize('failure', ['http', 'transport', 'parse', 'rate_limit'])
+def test_failed_jobs_are_paced_before_the_next_fetch(store: Store, monkeypatch: MonkeyPatch, failure: str) -> None:
+    for i in range(3):
+        add_job(store, 'zip_recruiter', str(i))
+    events: list[str | float] = []
+    monkeypatch.setattr('shigoto.enrich.time.sleep', lambda delay: events.append(delay))
+    monkeypatch.setattr('shigoto.enrich.random.uniform', lambda low, high: 0)
+
+    def fetch(target: DescriptionTarget) -> tuple[str, str]:
+        events.append('fetch')
+        if failure == 'http':
+            response = requests.Response()
+            response.status_code = 403
+            raise requests.HTTPError(response=response)
+        if failure == 'transport':
+            raise requests.RequestException('failed')
+        if failure == 'rate_limit':
+            raise RateLimited('blocked')
+        raise ValueError('unrecognized')
+
+    assert enrich._enrich(store, 'zip_recruiter', 3, fetch, delay=2, stop_on_failure=False) == 0
+    assert events == ['fetch', 2, 'fetch', 2, 'fetch']
+
+
 def test_linkedin_detail_reads_description_and_pay_box(monkeypatch: MonkeyPatch) -> None:
     from shigoto.sources import linkedin_detail
     page = """<div class="compensation__salary-range"><h3 class="compensation__heading">Base pay range</h3>
@@ -193,13 +223,15 @@ def test_ziprecruiter_description(monkeypatch: MonkeyPatch, fallback: bool) -> N
     session = Mock()
     session.get.return_value.url = 'https://www.ziprecruiter.com/job/1'
     session.get.return_value.text = page
+    session.get.return_value.status_code = 200
+    session.get.return_value.headers = {}
     factory = Mock(return_value=session)
     monkeypatch.setattr(ziprecruiter_detail, 'create_session', factory)
     monkeypatch.setenv('SHIGOTO_PROXY', 'http://proxy.test')
     url = 'https://www.ziprecruiter.com/c/Acme/Job/QA/-in-Toronto,ON?jid=1'
     assert ziprecruiter_detail.fetch_description(url) == ('Perform QA checks.', '')
     factory.assert_called_once_with(proxies='http://proxy.test', is_tls=True)
-    session.get.assert_called_once_with(url, timeout=30, allow_redirects=True)
+    session.get.assert_called_once_with(url, timeout=30, allow_redirects=False, headers={})
     session.close.assert_called_once()
 
 
@@ -209,16 +241,19 @@ def test_ziprecruiter_failure_continues(store: Store, monkeypatch: MonkeyPatch, 
     second = add_job(store, 'zip_recruiter', 'second')
     store.conn.execute('UPDATE jobs SET first_seen=? WHERE job_id=?', ('2026-10-14', first))
     store.commit()
-    sessions = [Mock(), Mock()]
+    failed_attempts = 1 if status in (404, 410) else ziprecruiter_detail.MAX_REQUESTS
+    sessions = [Mock() for _ in range(failed_attempts + 1)]
     for session in sessions:
         session.get.return_value.url = 'https://www.ziprecruiter.com/job/1'
-    sessions[0].get.return_value.status_code = status
-    if status == 200:
-        sessions[0].get.return_value.text = '<title>Just a moment...</title>'
-    else:
-        sessions[0].get.return_value.raise_for_status.side_effect = CurlHTTPError(
-            'blocked or gone', response=sessions[0].get.return_value)
-    sessions[1].get.return_value.text = ('<script type="application/ld+json">'
+        session.get.return_value.status_code = status
+        session.get.return_value.headers = {}
+        session.get.return_value.text = '<title>Just a moment...</title>'
+        if status != 200:
+            session.get.return_value.raise_for_status.side_effect = CurlHTTPError(
+                'blocked or gone', response=session.get.return_value)
+    sessions[-1].get.return_value.status_code = 200
+    sessions[-1].get.return_value.raise_for_status.side_effect = None
+    sessions[-1].get.return_value.text = ('<script type="application/ld+json">'
         '{"@type":"JobPosting","description":"<p>QA duties.</p>"}</script>')
     factory = Mock(side_effect=sessions)
     monkeypatch.setattr(ziprecruiter_detail, 'create_session', factory)
@@ -229,7 +264,7 @@ def test_ziprecruiter_failure_continues(store: Store, monkeypatch: MonkeyPatch, 
     rows = {r['job_id']: r for r in store.conn.execute('SELECT * FROM jobs')}
     assert bool(rows[first]['description_checked_at']) == (status in (404, 410))
     assert rows[second]['description'] == 'QA duties.'
-    assert factory.call_count == 2
+    assert factory.call_count == failed_attempts + 1
     for session in sessions:
         session.close.assert_called_once()
 
@@ -321,4 +356,4 @@ def test_ziprecruiter_curl_error_without_status(monkeypatch: MonkeyPatch, status
     with pytest.raises(requests.RequestException) as exc:
         ziprecruiter_detail.fetch_description('https://ziprecruiter.com/job/1')
     assert not isinstance(exc.value, requests.HTTPError)
-    session.close.assert_called_once()
+    assert session.close.call_count == ziprecruiter_detail.MAX_REQUESTS

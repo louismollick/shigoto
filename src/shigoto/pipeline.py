@@ -33,6 +33,8 @@ def run_once(config: Config, *, sync_sheet: bool = True, only: set[str] | None =
             if only is None or source.name in only:
                 stats.update(ingest(store, source, matcher, config))
         store.prune_rejected(now_iso())
+        # Apply current filters before spending the description budget on stored jobs.
+        store.reevaluate_exclusions(config, now_iso())
         store.commit()
         stats.update(enrich_descriptions(store, config))
         stats.update(check_liveness(store, config))

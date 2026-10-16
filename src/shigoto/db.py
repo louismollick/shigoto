@@ -280,6 +280,7 @@ class Store:
         rows = self.conn.execute(
             """SELECT j.job_id, s.source_id, s.url FROM jobs j JOIN job_sources s ON s.job_id = j.job_id
                WHERE s.source=? AND j.description='' AND j.description_checked_at IS NULL
+                   AND j.excluded_at IS NULL AND j.closed_at IS NULL
                GROUP BY j.job_id ORDER BY j.description_attempted_at IS NOT NULL,
                    j.description_attempted_at, j.first_seen DESC LIMIT ?""",
             (source, limit),
