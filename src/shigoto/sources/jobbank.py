@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup
 from shigoto.db import Store
 from shigoto.http import PoliteSession, posting_liveness
 from shigoto.models import Job, Liveness
-from shigoto.text import clean, html_to_text, parse_date
+from shigoto.text import clean, clean_description, html_to_text, parse_date
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +35,8 @@ HTML_SEARCH_LAST_SUCCESS = "jobbank:html_search:last_success"
 ATOM = "{http://www.w3.org/2005/Atom}"
 
 _session = PoliteSession(min_interval=CRAWL_DELAY, respect_robots=True)
+# Partner text is HTML only when it has real tags; plain text may contain comparisons like "<LOD".
+_PARTNER_HTML = re.compile(r"</?(?:p|br|li|ul|ol|div|span|strong|b|em|i|u|h[1-6])\b[^>]*>", re.I)
 
 
 class JobBankSource:
@@ -197,7 +199,14 @@ def fetch_description(job_url: str) -> str:
     if block and (description := html_to_text(str(block))):
         return description
     if soup.select_one(".job-posting-content #externalJobLink[href]"):
-        return ""  # External listings genuinely have no native requirements block.
+        # Partner listings (Indeed, Talent.com, ...) have no requirements block, but most embed the
+        # partner's text, often escaped HTML, as hidden schema.org markup. Without it there is
+        # genuinely nothing to read.
+        partner = soup.select_one(".job-posting-content [property=description]")
+        if not partner:
+            return ""
+        text = partner.get_text()
+        return html_to_text(text) if _PARTNER_HTML.search(text) else clean_description(text)
     raise ValueError("Job Bank detail has no requirements or external posting link")
 
 

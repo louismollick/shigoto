@@ -50,7 +50,7 @@ class DescriptionFetch(BaseModel):
     linkedin_proxied_max_per_run: int = 100
     linkedin_proxied_delay_seconds: float = 2.0
     jobbank_max_per_run: int = 60
-    ziprecruiter_max_per_run: int = 25
+    ziprecruiter_max_per_run: int = 50
     ziprecruiter_delay_seconds: float = 2.0
 
 
@@ -105,7 +105,6 @@ class Config(BaseModel):
     cities: list[City]
     jobspy: list[JobSpySite] = Field(default_factory=list)
     jobbank_enabled: bool = True
-    gcjobs_enabled: bool = True
     boards: Boards = Field(default_factory=Boards)
     title_keywords: list[str]  # a job's title must contain one (word-prefix match)
     exclude_title_keywords: list[str] = Field(default_factory=list)

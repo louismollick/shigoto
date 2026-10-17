@@ -13,7 +13,7 @@ from shigoto.db import SourceLink, Store
 from shigoto.http import PoliteSession, RateLimited, RobotsDisallowed
 from shigoto.liveness import check_liveness, check_source
 from shigoto.models import Job, Liveness
-from shigoto.sources import ats, gcjobs, indeed, jobbank, linkedin_detail, successfactors, workday
+from shigoto.sources import ats, indeed, jobbank, linkedin_detail, successfactors, workday
 
 CHECKS: list[tuple[Callable[[str, str], Liveness], PoliteSession, str, str, object]] = [
     (workday.check_liveness, workday._session,
@@ -24,7 +24,6 @@ CHECKS: list[tuple[Callable[[str, str], Liveness], PoliteSession, str, str, obje
     (ats.smartrecruiters_liveness, ats._session, "https://example.com/1", "board:1", {"id": "1", "name": "QA"}),
     (successfactors.check_liveness, successfactors._session, "https://example.com/job/1", "board:1",
      '<div class="jobdescription">Test samples.</div>'),
-    (gcjobs.check_liveness, gcjobs._session, f"{gcjobs.DETAIL_URL}?poster=1", "1", '<main><h1>QA</h1><p>Test samples.</p></main>'),
     (jobbank.check_liveness, jobbank._session, "https://www.jobbank.gc.ca/jobsearch/jobposting/1", "1",
      '<div class="job-posting-detail-requirements">Test samples.</div>'),
 ]

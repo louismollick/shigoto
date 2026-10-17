@@ -18,7 +18,7 @@ from shigoto.http import proxy_url
 from shigoto.text import html_to_text
 
 log = logging.getLogger(__name__)
-# Redirects consume the same budget as retries: at most 100 HTTP requests for 25 jobs.
+# Redirects consume the same budget as retries: at most 4 HTTP requests per posting.
 MAX_REQUESTS = 4
 _FLIGHT_REDIRECT = re.compile(r'NEXT_REDIRECT;(?:replace|push);([^;"\n]+);(?:303|307|308);')
 _TEXT_ROW = re.compile(rb"[0-9a-f]*:(?:T([0-9a-f]+),)?")
@@ -33,6 +33,12 @@ def _validate_url(url: str) -> None:
     host = parsed.hostname or ""
     if parsed.scheme != "https" or (host != "ziprecruiter.com" and not host.endswith(".ziprecruiter.com")):
         raise _UnsafeURL("ZipRecruiter redirected to an external host or insecure URL")
+
+
+def posting_key(url: str) -> str:
+    """The posting's `jid`. Each search can list one posting under a new listing key and URL slug."""
+    jid = dict(parse_qsl(urlparse(url).query)).get("jid")
+    return f"jid:{jid}" if jid else url
 
 
 def _flight_url(url: str) -> str:

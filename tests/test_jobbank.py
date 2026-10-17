@@ -94,10 +94,20 @@ def test_unknown_empty_detail_is_retryable(monkeypatch: MonkeyPatch, markup: str
         jb.fetch_description('https://www.jobbank.gc.ca/jobsearch/jobposting/1')
 
 
-def test_external_empty_and_native_detail(monkeypatch: MonkeyPatch, store: Store) -> None:
+def test_external_partner_and_native_detail(monkeypatch: MonkeyPatch, store: Store) -> None:
     monkeypatch.setattr(jb._session, 'get_text', lambda url: '''<section class="job-posting-content">
         <a id="externalJobLink" href="https://example.com/job">View full posting</a></section>''')
     assert jb.fetch_description('https://www.jobbank.gc.ca/jobsearch/jobposting/1') == ''
+    monkeypatch.setattr(jb._session, 'get_text', lambda url: '''<section class="job-posting-content">
+        <span property="description" class="hidden">&lt;p&gt;Analyze samples by HPLC.&lt;/p&gt;&lt;p&gt;Review data.&lt;/p&gt;</span>
+        <a id="externalJobLink" href="https://ca.indeed.com/viewjob?jk=1">View full posting</a></section>''')
+    assert jb.fetch_description('https://www.jobbank.gc.ca/jobsearch/jobposting/1') == 'Analyze samples by HPLC.\nReview data.'
+    monkeypatch.setattr(jb._session, 'get_text', lambda url: '''<section class="job-posting-content">
+        <span property="description" class="hidden">Results &lt;LOD must be flagged.
+        Continue testing.</span>
+        <a id="externalJobLink" href="https://ca.talent.com/redirect?id=1">View full posting</a></section>''')
+    assert jb.fetch_description('https://www.jobbank.gc.ca/jobsearch/jobposting/1') == (
+        'Results <LOD must be flagged.\nContinue testing.')
     monkeypatch.setattr(jb._session, 'get_text', lambda url: '<div class="job-posting-detail-requirements"><p>Test samples.</p></div>')
     assert jb.fetch_description('https://www.jobbank.gc.ca/jobsearch/jobposting/1') == 'Test samples.'
 

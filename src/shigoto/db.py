@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS ai_results (
 
 UpsertResult = Literal["new", "changed", "seen"]
 FULL_LISTING_SOURCES = frozenset({
-    "workday", "smartrecruiters", "greenhouse", "lever", "ashby", "successfactors", "gcjobs",
+    "workday", "smartrecruiters", "greenhouse", "lever", "ashby", "successfactors",
 })
 # Searches here are partial, so absence proves nothing, but each posting can be checked directly.
 DIRECT_CHECK_SOURCES = frozenset({"indeed", "linkedin", "jobbank"})
@@ -129,6 +129,7 @@ class DescriptionTarget:
     job_id: str
     source_id: str
     url: str
+    attempted_at: str | None = None
 
 @dataclass(frozen=True)
 class SourceLink:
@@ -275,17 +276,28 @@ class Store:
         return self.conn.execute("DELETE FROM rejected_postings WHERE julianday(last_seen) < julianday(?)",
                                  (cutoff,)).rowcount
 
-    def missing_descriptions(self, source: str, limit: int) -> list[DescriptionTarget]:
+    def missing_descriptions(self, source: str, limit: int | None = None) -> list[DescriptionTarget]:
         """Pending descriptions for `source`: untried newest first, then oldest failed attempts."""
         rows = self.conn.execute(
-            """SELECT j.job_id, s.source_id, s.url FROM jobs j JOIN job_sources s ON s.job_id = j.job_id
+            """SELECT j.job_id, s.source_id, s.url, j.description_attempted_at
+               FROM jobs j JOIN job_sources s ON s.job_id = j.job_id
                WHERE s.source=? AND j.description='' AND j.description_checked_at IS NULL
                    AND j.excluded_at IS NULL AND j.closed_at IS NULL
                GROUP BY j.job_id ORDER BY j.description_attempted_at IS NOT NULL,
                    j.description_attempted_at, j.first_seen DESC LIMIT ?""",
-            (source, limit),
+            (source, -1 if limit is None else limit),
         ).fetchall()
-        return [DescriptionTarget(r["job_id"], r["source_id"], r["url"]) for r in rows]
+        return [DescriptionTarget(r["job_id"], r["source_id"], r["url"], r["description_attempted_at"])
+                for r in rows]
+
+    def described_urls(self, source: str) -> list[tuple[str, str, str]]:
+        """(source URL, description, salary) for every described job seen on `source`."""
+        rows = self.conn.execute(
+            """SELECT s.url, j.description, j.salary FROM jobs j JOIN job_sources s ON s.job_id = j.job_id
+               WHERE s.source=? AND j.description<>''""",
+            (source,),
+        ).fetchall()
+        return [(r["url"], r["description"], r["salary"]) for r in rows]
 
     def record_description_attempt(self, job_id: str, now: str) -> None:
         """Move a failed fetch behind other pending descriptions without marking it checked."""

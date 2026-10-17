@@ -13,7 +13,7 @@ from collections.abc import Callable
 from shigoto.config import Config
 from shigoto.db import SourceLink, Store, now_iso
 from shigoto.models import Liveness
-from shigoto.sources import ats, gcjobs, indeed, jobbank, linkedin_detail, successfactors, workday
+from shigoto.sources import ats, indeed, jobbank, linkedin_detail, successfactors, workday
 
 log = logging.getLogger(__name__)
 _CHECKS: dict[str, Callable[[str, str], Liveness]] = {
@@ -23,14 +23,13 @@ _CHECKS: dict[str, Callable[[str, str], Liveness]] = {
     "smartrecruiters": ats.smartrecruiters_liveness,
     "ashby": ats.ashby_liveness,
     "successfactors": successfactors.check_liveness,
-    "gcjobs": gcjobs.check_liveness,
     "jobbank": jobbank.check_liveness,
     "linkedin": linkedin_detail.check_liveness,
 }
 
 
 def reset_robots() -> None:
-    for module in (ats, gcjobs, jobbank, successfactors, workday):
+    for module in (ats, jobbank, successfactors, workday):
         module._session.reset_robots()
 
 

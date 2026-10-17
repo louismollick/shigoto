@@ -13,7 +13,7 @@ from shigoto.config import Config
 from shigoto.db import DescriptionTarget, Store
 from shigoto.http import RateLimited, RobotsDisallowed
 from shigoto.models import Job
-from shigoto.sources import gcjobs, ziprecruiter_detail
+from shigoto.sources import jobbank, ziprecruiter_detail
 
 NOW = '2026-10-13T00:00:00+00:00'
 
@@ -39,16 +39,16 @@ def add_job(store: Store, source: str, source_id: str, description: str = '') ->
     return job_id
 
 
-def enrich_gcjobs(store: Store) -> int:
+def enrich_jobbank(store: Store) -> int:
     config = Config.model_validate({'search_terms': [], 'cities': [], 'title_keywords': [], 'sheet': {},
-                                   'descriptions': {'linkedin_max_per_run': 0, 'jobbank_max_per_run': 0}})
-    return enrich.enrich_descriptions(store, config)['described_gcjobs']
+                                   'descriptions': {'linkedin_max_per_run': 0, 'jobbank_max_per_run': 25}})
+    return enrich.enrich_descriptions(store, config)['described_jobbank']
 
 
-def test_gc_enrichment_only_retries_unchecked_empty_postings(store: Store, monkeypatch: MonkeyPatch) -> None:
-    empty = add_job(store, 'gcjobs', 'empty')
-    complete = add_job(store, 'gcjobs', 'complete', 'Analyze samples.')
-    checked = add_job(store, 'gcjobs', 'checked')
+def test_jobbank_enrichment_only_retries_unchecked_empty_postings(store: Store, monkeypatch: MonkeyPatch) -> None:
+    empty = add_job(store, 'jobbank', 'empty')
+    complete = add_job(store, 'jobbank', 'complete', 'Analyze samples.')
+    checked = add_job(store, 'jobbank', 'checked')
     store.set_description(checked, '', NOW)
     calls: list[str] = []
 
@@ -56,43 +56,43 @@ def test_gc_enrichment_only_retries_unchecked_empty_postings(store: Store, monke
         calls.append(url)
         return 'Duties\nAnalyze samples.'
 
-    monkeypatch.setattr(gcjobs, 'fetch_description', fetch)
-    assert enrich_gcjobs(store) == 1
+    monkeypatch.setattr(jobbank, 'fetch_description', fetch)
+    assert enrich_jobbank(store) == 1
     assert calls == ['https://example.com/empty']
     rows = {r['job_id']: r for r in store.conn.execute('SELECT * FROM jobs')}
     assert rows[empty]['description'] == 'Duties\nAnalyze samples.'
     assert rows[empty]['description_checked_at']
     assert rows[complete]['description_checked_at'] is None
-    assert enrich_gcjobs(store) == 0
+    assert enrich_jobbank(store) == 0
 
 
-def test_gc_parse_failure_leaves_target_pending_and_continues(store: Store, monkeypatch: MonkeyPatch) -> None:
-    bad = add_job(store, 'gcjobs', 'bad')
-    add_job(store, 'gcjobs', 'good')
+def test_jobbank_parse_failure_leaves_target_pending_and_continues(store: Store, monkeypatch: MonkeyPatch) -> None:
+    bad = add_job(store, 'jobbank', 'bad')
+    add_job(store, 'jobbank', 'good')
 
     def fetch(url: str) -> str:
         if url.endswith('/bad'):
             raise ValueError('parse failed')
         return 'Analyze samples.'
 
-    monkeypatch.setattr(gcjobs, 'fetch_description', fetch)
-    assert enrich_gcjobs(store) == 1
+    monkeypatch.setattr(jobbank, 'fetch_description', fetch)
+    assert enrich_jobbank(store) == 1
     row = store.conn.execute('SELECT * FROM jobs WHERE job_id=?', (bad,)).fetchone()
     assert row['description'] == '' and row['description_checked_at'] is None
 
 
-def test_gc_retry_cap(store: Store, monkeypatch: MonkeyPatch) -> None:
+def test_jobbank_retry_cap(store: Store, monkeypatch: MonkeyPatch) -> None:
     for i in range(26):
-        add_job(store, 'gcjobs', str(i))
-    monkeypatch.setattr(gcjobs, 'fetch_description', lambda url: 'Analyze samples.')
-    assert enrich_gcjobs(store) == 25
-    assert len(store.missing_descriptions('gcjobs', 30)) == 1
+        add_job(store, 'jobbank', str(i))
+    monkeypatch.setattr(jobbank, 'fetch_description', lambda url: 'Analyze samples.')
+    assert enrich_jobbank(store) == 25
+    assert len(store.missing_descriptions('jobbank', 30)) == 1
 
 
 @pytest.mark.parametrize('status', [404, 410])
-def test_gc_gone_posting_marks_checked_and_continues(store: Store, monkeypatch: MonkeyPatch, status: int) -> None:
-    job_id = add_job(store, 'gcjobs', 'gone')
-    add_job(store, 'gcjobs', 'good')
+def test_jobbank_gone_posting_marks_checked_and_continues(store: Store, monkeypatch: MonkeyPatch, status: int) -> None:
+    job_id = add_job(store, 'jobbank', 'gone')
+    add_job(store, 'jobbank', 'good')
     calls: list[str] = []
 
     def fetch(url: str) -> str:
@@ -103,23 +103,23 @@ def test_gc_gone_posting_marks_checked_and_continues(store: Store, monkeypatch: 
             raise requests.HTTPError(response=response)
         return 'Analyze samples.'
 
-    monkeypatch.setattr(gcjobs, 'fetch_description', fetch)
-    assert enrich_gcjobs(store) == 2 and len(calls) == 2
+    monkeypatch.setattr(jobbank, 'fetch_description', fetch)
+    assert enrich_jobbank(store) == 2 and len(calls) == 2
     row = store.conn.execute('SELECT * FROM jobs WHERE job_id=?', (job_id,)).fetchone()
     assert row['description'] == '' and row['description_checked_at']
 
 
-def test_gc_rate_limit_stops_run(store: Store, monkeypatch: MonkeyPatch) -> None:
-    add_job(store, 'gcjobs', '1')
-    add_job(store, 'gcjobs', '2')
+def test_jobbank_rate_limit_stops_run(store: Store, monkeypatch: MonkeyPatch) -> None:
+    add_job(store, 'jobbank', '1')
+    add_job(store, 'jobbank', '2')
     calls: list[str] = []
 
     def fetch(url: str) -> str:
         calls.append(url)
         raise RateLimited('blocked')
 
-    monkeypatch.setattr(gcjobs, 'fetch_description', fetch)
-    assert enrich_gcjobs(store) == 0 and len(calls) == 1
+    monkeypatch.setattr(jobbank, 'fetch_description', fetch)
+    assert enrich_jobbank(store) == 0 and len(calls) == 1
 
 
 def test_jobbank_unrecognized_detail_stays_pending_and_next_target_survives(store: Store, monkeypatch: MonkeyPatch) -> None:
@@ -357,3 +357,101 @@ def test_ziprecruiter_curl_error_without_status(monkeypatch: MonkeyPatch, status
         ziprecruiter_detail.fetch_description('https://ziprecruiter.com/job/1')
     assert not isinstance(exc.value, requests.HTTPError)
     assert session.close.call_count == ziprecruiter_detail.MAX_REQUESTS
+
+
+def add_zip_listing(store: Store, source_id: str, jid: str, description: str = '') -> str:
+    """One ZipRecruiter search listing; repeated searches give one posting (`jid`) new listing keys."""
+    store.upsert(Job(source='zip_recruiter', source_id=source_id,
+                     url=f'https://www.ziprecruiter.com/c/Acme/Job/QA/-in-Toronto,ON?jid={jid}',
+                     title='QA technician', company='Acme', location='Toronto', city='Toronto',
+                     description=description), NOW)
+    store.commit()
+    row = store.conn.execute('SELECT job_id FROM job_sources WHERE source=? AND source_id=?',
+                             ('zip_recruiter', source_id)).fetchone()
+    job_id: str = row['job_id']
+    return job_id
+
+
+def test_ziprecruiter_posting_key() -> None:
+    url = 'https://www.ziprecruiter.com/c/Cheo/Job/Lab-Tech/-in-Ottawa,ON?jid=7993fcc84826898c'
+    renamed = 'https://www.ziprecruiter.com/c/childrens-hospital/Job/Lab-Tech/-in-Ottawa,ON?jid=7993fcc84826898c'
+    assert ziprecruiter_detail.posting_key(url) == ziprecruiter_detail.posting_key(renamed) == 'jid:7993fcc84826898c'
+    assert ziprecruiter_detail.posting_key('https://www.ziprecruiter.com/job/1') == 'https://www.ziprecruiter.com/job/1'
+
+
+def test_duplicate_listings_share_one_fetch(store: Store) -> None:
+    first, second = add_zip_listing(store, 'zr-a', 'j1'), add_zip_listing(store, 'zr-b', 'j1')
+    other = add_zip_listing(store, 'zr-c', 'j2')
+    calls: list[str] = []
+
+    def fetch(target: DescriptionTarget) -> tuple[str, str]:
+        calls.append(target.url)
+        return f'Duties for {target.url[-2:]}', '$30 hourly'
+
+    assert enrich._enrich(store, 'zip_recruiter', 1, fetch, delay=0,
+                          posting_key=ziprecruiter_detail.posting_key) == 2
+    assert len(calls) == 1  # The cap counts postings, and both listings of j1 got the one fetch.
+    rows = {r['job_id']: r for r in store.conn.execute('SELECT * FROM jobs')}
+    assert rows[first]['description'] == rows[second]['description'] == 'Duties for j1'
+    assert rows[first]['salary'] == rows[second]['salary'] == '$30 hourly'
+    assert rows[other]['description'] == ''
+    assert enrich._enrich(store, 'zip_recruiter', 1, fetch, delay=0,
+                          posting_key=ziprecruiter_detail.posting_key) == 1
+    assert calls[1].endswith('jid=j2')
+
+
+def test_new_listing_copies_described_sibling_without_fetching(store: Store) -> None:
+    add_zip_listing(store, 'zr-a', 'j1', 'Perform QA checks.')
+    copy = add_zip_listing(store, 'zr-b', 'j1')
+    fetch = Mock()
+    assert enrich._enrich(store, 'zip_recruiter', 25, fetch, delay=0,
+                          posting_key=ziprecruiter_detail.posting_key) == 1
+    fetch.assert_not_called()
+    row = store.conn.execute('SELECT * FROM jobs WHERE job_id=?', (copy,)).fetchone()
+    assert row['description'] == 'Perform QA checks.' and row['description_checked_at']
+
+
+def test_failed_posting_moves_every_listing_back(store: Store, monkeypatch: MonkeyPatch) -> None:
+    listings = [add_zip_listing(store, 'zr-a', 'j1'), add_zip_listing(store, 'zr-b', 'j1')]
+    pending = add_zip_listing(store, 'zr-c', 'j2')
+
+    def fetch(target: DescriptionTarget) -> tuple[str, str]:
+        raise ValueError('challenge page')
+
+    monkeypatch.setattr(enrich, 'now_iso', lambda: NOW)
+    enrich._enrich(store, 'zip_recruiter', 2, fetch, delay=0, stop_on_failure=False,
+                   posting_key=ziprecruiter_detail.posting_key)
+    rows = {r['job_id']: r for r in store.conn.execute('SELECT * FROM jobs')}
+    assert all(rows[job_id]['description_attempted_at'] == NOW for job_id in [*listings, pending])
+    assert all(rows[job_id]['description_checked_at'] is None for job_id in [*listings, pending])
+
+
+def test_new_alias_of_failed_posting_waits_behind_untried_postings(store: Store, monkeypatch: MonkeyPatch) -> None:
+    add_zip_listing(store, 'zr-a', 'failed')
+    add_zip_listing(store, 'zr-b', 'untried')
+    store.conn.execute("UPDATE jobs SET description_attempted_at=? WHERE job_id IN "
+                       "(SELECT job_id FROM job_sources WHERE source_id='zr-a')", (NOW,))
+    store.commit()
+    add_zip_listing(store, 'zr-c', 'failed')  # A fresh search lists the failed posting again.
+    store.conn.execute("UPDATE jobs SET first_seen='2026-10-10' WHERE job_id IN "
+                       "(SELECT job_id FROM job_sources WHERE source_id IN ('zr-a', 'zr-b'))")
+    store.commit()  # The alias is the newest untried job, which alone would put it first.
+    calls: list[str] = []
+
+    def fetch(target: DescriptionTarget) -> tuple[str, str]:
+        calls.append(target.url)
+        raise ValueError('challenge page')
+
+    enrich._enrich(store, 'zip_recruiter', 1, fetch, delay=0, stop_on_failure=False,
+                   posting_key=ziprecruiter_detail.posting_key)
+    assert calls[0].endswith('jid=untried')
+
+
+def test_copied_sibling_description_brings_its_salary(store: Store) -> None:
+    donor = add_zip_listing(store, 'zr-a', 'j1', 'Perform QA checks.')
+    store.conn.execute("UPDATE jobs SET salary='$60,000 yearly' WHERE job_id=?", (donor,))
+    store.commit()
+    copy = add_zip_listing(store, 'zr-b', 'j1')
+    enrich._enrich(store, 'zip_recruiter', 25, Mock(), delay=0, posting_key=ziprecruiter_detail.posting_key)
+    row = store.conn.execute('SELECT * FROM jobs WHERE job_id=?', (copy,)).fetchone()
+    assert row['salary'] == '$60,000 yearly'

@@ -1,9 +1,10 @@
 """Fill in missing descriptions one detail page at a time, capped per run.
 
-LinkedIn, ZipRecruiter and Job Bank search results carry no description. GC Jobs details can fail
-and leave an empty description. Retry missing descriptions, capped per source. Direct
-LinkedIn fetches stop at the first sign of blocking; proxied ones skip to the next job.
-ZipRecruiter requires a proxy and skips failed jobs for later retry.
+LinkedIn, ZipRecruiter and Job Bank search results carry no description. Retry missing
+descriptions, capped per source. Direct LinkedIn fetches stop at the first sign of blocking;
+proxied ones skip to the next job. ZipRecruiter requires a proxy and skips failed jobs for later
+retry. It lists one posting under several search keys, so its jobs are grouped by posting and
+each posting is fetched once.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import requests
 from shigoto.config import Config
 from shigoto.db import DescriptionTarget, Store, now_iso
 from shigoto.http import RateLimited, RobotsDisallowed, proxy_url
-from shigoto.sources import gcjobs, jobbank, linkedin_detail, ziprecruiter_detail
+from shigoto.sources import jobbank, linkedin_detail, ziprecruiter_detail
 
 log = logging.getLogger(__name__)
 
@@ -37,22 +38,43 @@ def enrich_descriptions(store: Store, config: Config) -> dict[str, int]:
         "described_jobbank": _enrich(
             store, "jobbank", d.jobbank_max_per_run, lambda t: (jobbank.fetch_description(t.url), ""), delay=0,
         ),
-        "described_gcjobs": _enrich(store, "gcjobs", 25, lambda t: (gcjobs.fetch_description(t.url), ""),
-                                    delay=0),
         "described_zip_recruiter": _enrich(
             store, "zip_recruiter", d.ziprecruiter_max_per_run,
             lambda t: ziprecruiter_detail.fetch_description(t.url, delay=d.ziprecruiter_delay_seconds),
             delay=d.ziprecruiter_delay_seconds, stop_on_failure=False,
+            posting_key=ziprecruiter_detail.posting_key,
         ) if proxied else 0,
     }
 
 
 def _enrich(store: Store, source: str, limit: int, fetch: Callable[[DescriptionTarget], tuple[str, str]],
-            delay: float, stop_on_failure: bool = True) -> int:
-    """`fetch` returns (description, salary). Failed jobs stay unchecked and rotate behind other pending jobs."""
+            delay: float, stop_on_failure: bool = True, posting_key: Callable[[str], str] | None = None) -> int:
+    """`fetch` returns (description, salary). Failed jobs stay unchecked and rotate behind other pending jobs.
+
+    With `posting_key`, jobs whose URLs share a key are one posting: a blank job first copies an
+    already described sibling's text, then each remaining posting costs one fetch and fills every
+    pending job in its group. `limit` caps postings, not jobs. Returns the number of jobs described.
+    """
     done = 0
     attempted = 0
-    for target in store.missing_descriptions(source, limit):
+    groups: dict[str, list[DescriptionTarget]] = {}
+    if posting_key:
+        known = {posting_key(url): (text, salary) for url, text, salary in store.described_urls(source)}
+        for target in store.missing_descriptions(source):
+            key = posting_key(target.url)
+            if key in known:
+                text, salary = known[key]
+                store.set_description(target.job_id, text, now_iso(), salary)
+                done += 1
+            else:
+                groups.setdefault(key, []).append(target)
+    else:
+        groups = {t.job_id: [t] for t in store.missing_descriptions(source, limit)}
+    # A posting rotates by its latest attempt, so a fresh duplicate listing cannot jump a failed
+    # posting ahead of untried ones. The stable sort keeps newest-first order among untried postings.
+    ordered = sorted(groups.values(), key=lambda g: max((t.attempted_at or "" for t in g), default=""))
+    for group in ordered[:limit]:
+        target = group[0]
         # Pace the next job after every outcome, including blocked or unrecognized pages.
         if attempted and delay:
             time.sleep(delay + random.uniform(0, delay / 2))
@@ -61,7 +83,7 @@ def _enrich(store: Store, source: str, limit: int, fetch: Callable[[DescriptionT
         try:
             description, salary = fetch(target)
         except RateLimited:
-            store.record_description_attempt(target.job_id, now_iso())
+            _record_attempt(store, group)
             log.warning("%s rate-limited a description fetch%s", source,
                         "; stopping for this run" if stop_on_failure else "")
             if stop_on_failure:
@@ -70,7 +92,7 @@ def _enrich(store: Store, source: str, limit: int, fetch: Callable[[DescriptionT
         except requests.HTTPError as e:
             status = e.response.status_code if e.response is not None else 0
             if status not in (404, 410):
-                store.record_description_attempt(target.job_id, now_iso())
+                _record_attempt(store, group)
                 log.warning("%s job %s description fetch got HTTP %s%s", source, target.job_id, status,
                             "; stopping for this run" if stop_on_failure else "")
                 if stop_on_failure:
@@ -78,21 +100,28 @@ def _enrich(store: Store, source: str, limit: int, fetch: Callable[[DescriptionT
                 continue
             description = ""  # posting gone: mark checked so we don't retry
         except requests.RequestException:
-            store.record_description_attempt(target.job_id, now_iso())
+            _record_attempt(store, group)
             log.exception("%s description fetch failed", source)
             if stop_on_failure:
                 break
             continue
         except RobotsDisallowed:
-            store.record_description_attempt(target.job_id, now_iso())
+            _record_attempt(store, group)
             log.exception("%s description fetch disallowed", source)
             break
         except ValueError:
-            store.record_description_attempt(target.job_id, now_iso())
+            _record_attempt(store, group)
             # An unrecognized successful response is retryable, not a checked empty posting.
             log.exception("%s description parse failed", source)
             continue
-        store.set_description(target.job_id, description, now_iso(), salary)
-        done += 1
-    log.info("%s: completed %d of %d description jobs", source, done, attempted)
+        for job in group:
+            store.set_description(job.job_id, description, now_iso(), salary)
+        done += len(group)
+    log.info("%s: completed %d description jobs from %d fetches", source, done, attempted)
     return done
+
+
+def _record_attempt(store: Store, group: list[DescriptionTarget]) -> None:
+    now = now_iso()
+    for job in group:
+        store.record_description_attempt(job.job_id, now)
