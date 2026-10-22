@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 5 * * *"
   push:
     branches: [main]
   pull_request:
@@ -17,7 +20,7 @@ jobs:
 
   image:
     needs: check
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -34,6 +37,8 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          pull: true
+          no-cache: ${{ github.event_name == 'schedule' }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
