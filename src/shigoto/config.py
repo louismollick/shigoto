@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class City(BaseModel):
@@ -108,6 +108,8 @@ class Config(BaseModel):
     boards: Boards = Field(default_factory=Boards)
     title_keywords: list[str]  # a job's title must contain one (word-prefix match)
     exclude_title_keywords: list[str] = Field(default_factory=list)
+    # An exclusion is ignored when the title also matches one of its exceptions ("Senior Lab Technician").
+    exclude_title_exceptions: dict[str, list[str]] = Field(default_factory=dict)
     exclude_companies: list[str] = Field(default_factory=list)
     max_posting_age_days: int | None = Field(default=None, ge=1)
     descriptions: DescriptionFetch = Field(default_factory=DescriptionFetch)
@@ -119,6 +121,12 @@ class Config(BaseModel):
     # Filled from env, not yaml.
     db_path: Path = Path("data/shigoto.db")
     google_credentials: Path | None = None
+
+    @model_validator(mode="after")
+    def _exceptions_name_exclusions(self) -> Config:
+        if unknown := set(self.exclude_title_exceptions) - set(self.exclude_title_keywords):
+            raise ValueError(f"exclude_title_exceptions keys are not in exclude_title_keywords: {sorted(unknown)}")
+        return self
 
 
 def load_config(path: Path) -> Config:

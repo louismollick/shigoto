@@ -67,11 +67,11 @@ def ingest(store: Store, source: Source, matcher: CityMatcher, config: Config) -
                 store.commit()  # Long sources (Job Bank's first search pass) must not hold the write lock for hours.
             snapshot = job_json(raw)
             job = normalize(raw, matcher, config.title_keywords, config.exclude_title_keywords,
-                            config.exclude_companies)
+                            config.exclude_companies, config.exclude_title_exceptions)
             if job is None:
                 stats["dropped"] += 1
                 reason = rejection_reason(raw, config.title_keywords, config.exclude_title_keywords,
-                                          config.exclude_companies)
+                                          config.exclude_companies, config.exclude_title_exceptions)
                 assert reason is not None
                 stats[f"rejected_{reason}"] += 1
                 known = store.conn.execute("SELECT 1 FROM job_sources WHERE source=? AND source_id=?",
@@ -112,12 +112,12 @@ def reprocess(config: Config, *, sync_sheet: bool = True) -> dict[str, int]:
         for record in records:
             job = job_from_json(record["raw"])
             included = normalize(job, matcher, config.title_keywords, config.exclude_title_keywords,
-                                 config.exclude_companies)
+                                 config.exclude_companies, config.exclude_title_exceptions)
             stats["reprocessed"] += 1
             if included is None:
                 stats["dropped"] += 1
                 reason = rejection_reason(job, config.title_keywords, config.exclude_title_keywords,
-                                          config.exclude_companies)
+                                          config.exclude_companies, config.exclude_title_exceptions)
                 assert reason is not None
                 stats[f"rejected_{reason}"] += 1
             # Existing records still need corrected fields so exclusion uses the replayed title/city.
@@ -129,11 +129,11 @@ def reprocess(config: Config, *, sync_sheet: bool = True) -> dict[str, int]:
         for record in rejected:
             job = job_from_json(record["raw"])
             included = normalize(job, matcher, config.title_keywords, config.exclude_title_keywords,
-                                 config.exclude_companies)
+                                 config.exclude_companies, config.exclude_title_exceptions)
             stats["reprocessed"] += 1
             if included is None:
                 reason = rejection_reason(job, config.title_keywords, config.exclude_title_keywords,
-                                          config.exclude_companies)
+                                          config.exclude_companies, config.exclude_title_exceptions)
                 assert reason is not None
                 stats["dropped"] += 1
                 stats[f"rejected_{reason}"] += 1

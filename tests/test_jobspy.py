@@ -159,7 +159,7 @@ def test_recall_config_and_zip_source_id() -> None:
     config = load_config(Path("config.yaml"))
     indeed = next(s for s in config.jobspy if s.site == "indeed")
     assert (indeed.hours_old, indeed.results_wanted, indeed.full_sweep_days,
-            indeed.full_sweep_results_wanted) == (168, 100, 7, 400)
+            indeed.full_sweep_results_wanted) == (168, 200, 7, 400)
     linkedin = next(s for s in config.jobspy if s.site == "linkedin")
     assert linkedin.query_groups is not None and len(linkedin.query_groups) == 3 and linkedin.rotate_groups
     zip_site = next(s for s in config.jobspy if s.site == "zip_recruiter")

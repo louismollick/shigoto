@@ -5,7 +5,7 @@ import pytest
 
 from shigoto.config import City, load_config
 from shigoto.models import Job
-from shigoto.normalize import CityMatcher, dedupe_key, normalize, title_matches
+from shigoto.normalize import CityMatcher, dedupe_key, normalize, rejection_reason, title_excluded, title_matches
 
 CITIES = [
     City(name="Toronto", jobspy_location="Toronto, ON", aliases=["Mississauga"]),
@@ -117,3 +117,23 @@ def test_recall_title_additions(title: str) -> None:
     config = load_config(Path("config.yaml"))
     assert normalize(job(title=title), CityMatcher(config.cities), config.title_keywords,
                      config.exclude_title_keywords, config.exclude_companies) is not None
+
+
+@pytest.mark.parametrize(("title", "excluded"), [
+    ("Senior Quality Lab Technician", False), ("Sr. QA Technician", False), ("Senior Food Technologist", False),
+    ("Sr Laboratory Analyst", False), ("Senior QA Specialist", True), ("Senior Lab Manager", True),
+    ("Senior Scientist", True),
+])
+def test_senior_bench_titles_are_kept(title: str, excluded: bool) -> None:
+    config = load_config(Path("config.yaml"))
+    reason = rejection_reason(job(title=title, city="Toronto"), config.title_keywords + ["specialist", "scientist"],
+                              config.exclude_title_keywords, config.exclude_companies,
+                              config.exclude_title_exceptions)
+    assert (reason == "excluded_title") is excluded
+
+
+def test_title_exception_applies_only_to_its_keyword() -> None:
+    exceptions = {"senior": ["technician"]}
+    assert not title_excluded("Senior Technician", ["senior"], exceptions)
+    assert title_excluded("Senior Technician Supervisor", ["senior", "supervisor"], exceptions)
+    assert title_excluded("Senior Technician", ["senior"])

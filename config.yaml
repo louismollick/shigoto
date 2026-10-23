@@ -71,7 +71,7 @@ cities:
 # Indeed searches every term x city, with a weekly full sweep to catch indexing lag.
 jobspy:
   - site: indeed
-    results_wanted: 100
+    results_wanted: 200  # 100 capped six term/city searches; a probe found ~10% of passing postings unseen
     hours_old: 168
     full_sweep_days: 7
     full_sweep_results_wanted: 400
@@ -128,7 +128,7 @@ title_keywords: [microbiolog*, laborator*, lab, quality, QA, QC, FSQA, HACCP, fo
                  in vivo, OOS, GC, GCMS*, LCMS*, ICP*, spectro*, chromatograph*, SQF,
                  analyst*, assurance, sterility, QMS, testing, GMP, bioanalytic*, chemical technologist*,
                  food inspector*, food inspection, preparation technician, diet technician,
-                 baking technolog*, regulatory affairs coordinator, sanitation facilities coordinator]
+                 baking technolog*, beverage technolog*, regulatory affairs coordinator, sanitation facilities coordinator]
 
 # Then dropped if the title contains any of these (same matching rules). Seniority and part-time
 # titles are never a fit for her. The rest never scored 55+ across ~2,000 AI reviews (Oct 2026).
@@ -142,6 +142,12 @@ exclude_title_keywords: [software, SDET, tester, game, games, QA automation, tes
                          research chair, instructor*, tutor, tutors, electrical, automotive, aerospace, welding,
                          systems testing, system testing, business analyst, financial analyst, finance analyst,
                          marketing analyst, marketing coordinator]
+
+# Keep senior bench roles: "Senior Quality Lab Technician" (Mondelez) and "Senior QA Technician" (Sunrise
+# Soya) were Recommend-grade with no stated experience minimum. Other senior titles stay excluded.
+exclude_title_exceptions:
+  senior: &bench_titles [technician*, technolog*, lab, laborator*]
+  sr: *bench_titles
 
 # Jobs from these employers are hidden (same matching rules, against the company name).
 exclude_companies: []
@@ -182,6 +188,7 @@ boards:
     - {name: Aspect Biosystems, slug: aspectbiosystems}
   lever:
     - {name: Deep Genomics, slug: deepgenomics}
+    - {name: Sunrise Farms, slug: sunrisefarms}  # 2026-10-23: Cloverdale QA tech missing from aggregators
   ashby:
     - {name: Nomic, slug: nomic}
   smartrecruiters:

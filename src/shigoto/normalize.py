@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Mapping
 from typing import Literal
 
 from shigoto.config import City
@@ -58,8 +59,15 @@ def title_matches(title: str, keywords: list[str]) -> bool:
     )
 
 
+def title_excluded(title: str, exclude: list[str], exceptions: Mapping[str, list[str]] | None = None) -> bool:
+    """True if the title contains an excluded keyword whose own exceptions don't also match."""
+    exceptions = exceptions or {}
+    return any(title_matches(title, [k]) and not title_matches(title, exceptions.get(k, [])) for k in exclude)
+
+
 def normalize(job: Job, matcher: CityMatcher, title_keywords: list[str],
-              exclude_title_keywords: list[str], exclude_companies: list[str]) -> Job | None:
+              exclude_title_keywords: list[str], exclude_companies: list[str],
+              exclude_title_exceptions: Mapping[str, list[str]] | None = None) -> Job | None:
     """Clean a job in place and return it, or None if it's outside our cities or its title
     doesn't look relevant, or its company is excluded."""
     job.title = clean(job.title)
@@ -70,20 +78,22 @@ def normalize(job: Job, matcher: CityMatcher, title_keywords: list[str],
     job.salary = clean(job.salary)
     job.job_type = clean(job.job_type)
     job.description = clean_description(job.description)
-    return job if rejection_reason(job, title_keywords, exclude_title_keywords, exclude_companies) is None else None
+    reason = rejection_reason(job, title_keywords, exclude_title_keywords, exclude_companies, exclude_title_exceptions)
+    return job if reason is None else None
 
 
 RejectionReason = Literal["location", "title", "excluded_title", "company"]
 
 
 def rejection_reason(job: Job, title_keywords: list[str], exclude_title_keywords: list[str],
-                     exclude_companies: list[str]) -> RejectionReason | None:
+                     exclude_companies: list[str],
+                     exclude_title_exceptions: Mapping[str, list[str]] | None = None) -> RejectionReason | None:
     """Explain a rejection after normalize() has cleaned fields and assigned the city."""
     if not job.city:
         return "location"
     if not job.title or not title_matches(job.title, title_keywords):
         return "title"
-    if title_matches(job.title, exclude_title_keywords):
+    if title_excluded(job.title, exclude_title_keywords, exclude_title_exceptions):
         return "excluded_title"
     if title_matches(job.company, exclude_companies):
         return "company"

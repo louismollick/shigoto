@@ -20,7 +20,7 @@ from typing import Literal
 
 from shigoto.config import Config
 from shigoto.models import Job, Liveness, job_json
-from shigoto.normalize import RejectionReason, dedupe_key, title_matches
+from shigoto.normalize import RejectionReason, dedupe_key, title_excluded, title_matches
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -385,7 +385,8 @@ class Store:
         excluded = 0
         for row in self.conn.execute("SELECT job_id, city, title, company, posted_date FROM jobs").fetchall():
             passes = (row["city"] in cities and title_matches(row["title"], config.title_keywords)
-                      and not title_matches(row["title"], config.exclude_title_keywords)
+                      and not title_excluded(row["title"], config.exclude_title_keywords,
+                                             config.exclude_title_exceptions)
                       and not title_matches(row["company"], config.exclude_companies)
                       and (cutoff is None or not row["posted_date"] or row["posted_date"] >= cutoff))
             excluded += not passes
