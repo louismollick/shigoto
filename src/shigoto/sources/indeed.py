@@ -10,7 +10,7 @@ import json
 import logging
 
 import requests
-from jobspy.indeed.constant import api_headers
+from jobspy.indeed.constant import headers as api_headers
 
 from shigoto.http import PoliteSession, RateLimited
 from shigoto.models import Liveness

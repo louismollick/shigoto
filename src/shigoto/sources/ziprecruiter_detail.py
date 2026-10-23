@@ -11,7 +11,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 import requests
 from bs4 import BeautifulSoup
 from curl_cffi.requests.exceptions import RequestException
-from jobspy.util import create_session
+from jobspy.util import TLSRotating
 from jobspy.ziprecruiter.util import page_values
 
 from shigoto.http import proxy_url
@@ -33,6 +33,11 @@ def _validate_url(url: str) -> None:
     host = parsed.hostname or ""
     if parsed.scheme != "https" or (host != "ziprecruiter.com" and not host.endswith(".ziprecruiter.com")):
         raise _UnsafeURL("ZipRecruiter redirected to an external host or insecure URL")
+
+
+def create_session(proxy: str | None) -> TLSRotating:
+    """A fresh curl_cffi browser-impersonating session, through the proxy when one is set."""
+    return TLSRotating([proxy] if proxy else None)
 
 
 def posting_key(url: str) -> str:
@@ -79,7 +84,7 @@ def _description(page: str, flight: bool) -> str:
             else:
                 pos = raw.find(b"\n", pos) + 1 or len(raw)
         html = f'<script>self.__next_f.push([1,{json.dumps(data)}])</script>'
-        details = page_values(html, "jobDetails")[0]
+        details = page_values(html, "jobDetails")["jobDetails"]
         markup = details.get("htmlFullDescription") if isinstance(details, dict) else None
         # A truncated Flight stream can omit a referenced text row. JobSpy then
         # leaves "$1" unchanged; never save that token as a checked description.
@@ -105,7 +110,7 @@ def fetch_description(url: str, *, delay: float = 2) -> tuple[str, str]:
         if attempt and delay:
             time.sleep(delay * min(2 ** (attempt - 1), 4))
         request_url = _flight_url(url) if flight else url
-        session = create_session(proxies=proxy_url(), is_tls=True)
+        session = create_session(proxy_url())
         try:
             # Follow redirects ourselves so each hop is paced, budgeted and host-checked.
             response = session.get(request_url, timeout=30, allow_redirects=False,
@@ -120,7 +125,7 @@ def fetch_description(url: str, *, delay: float = 2) -> tuple[str, str]:
                 url = urljoin(response.url, location)
                 _validate_url(url)
                 continue
-            response.raise_for_status()
+            response.raise_for_status()  # type: ignore[no-untyped-call]  # curl_cffi leaves it untyped
             is_flight = "text/x-component" in response.headers.get("Content-Type", "")
             if is_flight and (redirect := _FLIGHT_REDIRECT.search(response.text)):
                 url = urljoin(response.url, redirect[1])

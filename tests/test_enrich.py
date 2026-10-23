@@ -230,7 +230,7 @@ def test_ziprecruiter_description(monkeypatch: MonkeyPatch, fallback: bool) -> N
     monkeypatch.setenv('SHIGOTO_PROXY', 'http://proxy.test')
     url = 'https://www.ziprecruiter.com/c/Acme/Job/QA/-in-Toronto,ON?jid=1'
     assert ziprecruiter_detail.fetch_description(url) == ('Perform QA checks.', '')
-    factory.assert_called_once_with(proxies='http://proxy.test', is_tls=True)
+    factory.assert_called_once_with('http://proxy.test')
     session.get.assert_called_once_with(url, timeout=30, allow_redirects=False, headers={})
     session.close.assert_called_once()
 

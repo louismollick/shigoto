@@ -11,7 +11,6 @@ from collections.abc import Iterator, Mapping
 from datetime import datetime, timedelta
 
 from jobspy import scrape_jobs
-import jobspy.indeed as jobspy_indeed
 
 from shigoto.config import City, JobSpySite
 from shigoto.db import Store, now_iso
@@ -22,27 +21,9 @@ from shigoto.text import clean, clean_description, parse_date
 log = logging.getLogger(__name__)
 
 
-def include_exact_salary(query: str) -> str:
-    """Work around JobSpy's Range-only Indeed query without extra detail requests.
-
-    Indeed also returns Exactly.value. Alias it to the bounds JobSpy already reads,
-    for both employer pay and estimates. Keep the braces escaped for query.format().
-    """
-    if "... on Exactly" in query:
-        return query
-    return query.replace(
-        "... on Range {{",
-        "... on Exactly {{ min: value max: value }}\n                    ... on Range {{",
-    )
-
-
-# JobSpy imports the query into its scraper module; changing constant.py alone has no effect.
-jobspy_indeed.job_search_query = include_exact_salary(jobspy_indeed.job_search_query)
-
-
 # 403 is a bot challenge (ZipRecruiter on datacenter IPs); 429/999 are rate limits. All block the run.
 _BLOCKED = re.compile(r"\b(403|429|999)\b")
-_PROXY_ATTEMPTS = 3
+_PROXY_ATTEMPTS = 5  # ~65% of proxied ZipRecruiter requests get 403; 5 tries clear ~88% of queries
 _PROXY_RETRY_SECONDS = 5
 
 
@@ -80,7 +61,7 @@ class JobSpySource:
     def fetch(self) -> Iterator[Job]:
         self.incomplete = False
         detector = _BlockDetector()
-        jobspy_logger = logging.getLogger(f"JobSpy:{_jobspy_logger_name(self.name)}")
+        jobspy_logger = logging.getLogger("jobspy")  # every scraper logs to a child of this
         groups = self.site.query_groups
         queries = [build_queries(group, True) for group in groups] if groups else [self.terms]
         rotate = bool(groups) and self.site.rotate_groups
@@ -179,7 +160,7 @@ class JobSpySource:
         )
         log.info("%s %r in %s: %d results", self.name, query[:40], city.name, len(df))
         for row in df.to_dict("records"):
-            job = row_to_job(row, city.name)
+            job = row_to_job({str(key): value for key, value in row.items()}, city.name)
             if job:
                 yield job
 
@@ -286,8 +267,3 @@ def format_salary(row: Mapping[str, object]) -> str:
         return description_salary(clean_text(row.get("description")), currency)
     interval = clean(row.get("interval"))
     return _format_pay(amounts, currency, interval)
-
-
-def _jobspy_logger_name(site: str) -> str:
-    return {"linkedin": "LinkedIn", "indeed": "Indeed", "glassdoor": "Glassdoor",
-            "zip_recruiter": "ZipRecruiter", "google": "Google"}[site]

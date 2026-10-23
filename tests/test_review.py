@@ -183,6 +183,15 @@ def test_cad_hourly_pay_always_annualized(unit: str, full_time: bool, currency: 
     assert finalize(judgment(pay=pay), job, job).score == expected
 
 
+@pytest.mark.parametrize(("maximum", "expected"), [(1611.47, 89), (14999, 89), (15000, 54)])
+def test_implausible_annual_pay_is_treated_as_unknown(maximum: float, expected: int) -> None:
+    # Job Bank listed weekly pay ("$1,362.39 to $1,611.47 annually"); Codex reported it as annual.
+    _, [job] = read_jobs(Worksheet([record()]).rows, ReviewReport())
+    pay = Pay(minimum=1362.39, maximum=maximum, currency="CAD", unit="annual", full_time=True, negotiable=False)
+    fields = finalize(judgment(pay=pay), job, job)
+    assert fields.score == expected and ("below the $55,000" in fields.notes) == (expected == 54)
+
+
 def test_crossing_range_and_unknown_pay_have_no_penalty() -> None:
     _, [job] = read_jobs(Worksheet([record()]).rows, ReviewReport())
     crossing = Pay(minimum=50000, maximum=60000, currency="CAD", unit="annual", full_time=True, negotiable=False)
@@ -265,9 +274,10 @@ def test_sheet_reads_are_paced_and_quota_retries_are_bounded(monkeypatch: pytest
     assert calls == 3 and delays.count(60) == 2
 
 
-def test_conflicting_duplicate_overlap_remains_pending_without_overwriting_prior_group(tmp_path: Path) -> None:
+def test_conflicting_duplicate_overlap_publishes_focus_standalone(tmp_path: Path) -> None:
     sheet = Worksheet([record("a", **{"Updated At": "2026-10-08T12:00:00-05:00"}),
                        record("c", **{"Updated At": "2026-10-08T11:00:00-05:00"}), record("b")])
+    store = Store(tmp_path / "t.db")
 
     def judge(job: ReviewJob, group: list[ReviewJob], config: ReviewConfig) -> Judgment:
         if job.job_id == "a":
@@ -275,11 +285,19 @@ def test_conflicting_duplicate_overlap_remains_pending_without_overwriting_prior
         assert job.job_id == "c"
         return judgment("c", duplicate_job_ids=["b"], base_score=79)
 
-    report = run(Store(tmp_path / "t.db"), sheet, judge=judge)
-    assert report.reviewed == 2 and report.pending == 1
-    assert report.failures[0].error == "Conflicting duplicate canonical for Job ID b"
+    report = run(store, sheet, judge=judge)
+    assert report.reviewed == 3 and report.pending == 0 and not report.failures
     scores = {row[HEADERS.index("Job ID")]: row[HEADERS.index("AI Score")] for row in sheet.rows[1:]}
-    assert scores == {"a": "89", "b": "89", "c": ""}
+    assert scores == {"a": "89", "b": "89", "c": "79"}
+    notes = {row[HEADERS.index("Job ID")]: row[HEADERS.index("AI Notes")] for row in sheet.rows[1:]}
+    assert notes["a"].startswith("Duplicate of b.") and not notes["c"].startswith("Duplicate of")
+    # The prior group keeps its saved result, and the standalone job is not re-judged.
+    saved = {row["job_id"]: Judgment.model_validate_json(row["result"])
+             for row in store.conn.execute("SELECT job_id, result FROM ai_results")}
+    assert saved["a"].canonical_job_id == saved["b"].canonical_job_id == "b"
+    assert saved["c"].canonical_job_id == "c" and saved["c"].duplicate_job_ids == []
+    again = run(store, sheet, judge=lambda *args: pytest.fail("Standalone job was already reviewed"))
+    assert again.reviewed == 0 and again.pending == 0
 
 
 def test_score_verification_uses_unformatted_values(tmp_path: Path) -> None:

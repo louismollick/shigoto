@@ -17,6 +17,10 @@ RUN useradd --uid 1000 --create-home shigoto && install -d -o shigoto -g shigoto
 WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PYTHONUNBUFFERED=1
 
+# uv needs git to install python-jobspy from its pinned GitHub commit.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY README.md config.yaml ./

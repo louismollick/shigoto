@@ -8,7 +8,7 @@ dependencies = [
     "beautifulsoup4>=4.15.0",
     "gspread>=6.2.1",
     "pydantic>=2.13.5",
-    "python-jobspy>=1.2.0",
+    "python-jobspy @ git+https://github.com/speedyapply/JobSpy@cd8b367a476dc1ba2182c1aa38012f82ed29446f",
     "pyyaml>=6.0.3",
     "requests>=2.34.2",
 ]

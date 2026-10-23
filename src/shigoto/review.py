@@ -38,6 +38,7 @@ INPUT_COLUMNS = ["Job ID", "Title", "Company", "Location", "Salary", "Type", "De
 PROMPT = files("shigoto").joinpath("review_prompt.md").read_text()
 POLICY_VERSION = "2"
 PAY_FLOOR = 55000
+MIN_PLAUSIBLE_ANNUAL = 15000  # a smaller "annual" maximum is a mislabeled weekly or hourly figure
 NEAR_FLOOR = 0.95 * PAY_FLOOR  # close enough to negotiate up, treated like negotiable pay
 WITHHELD = "Notes withheld: write blocked."
 Category = Literal["Food QA", "Microbiology Lab", "QC Lab", "Biotech/Pharma", "Environmental Lab",
@@ -307,6 +308,8 @@ def finalize(result: Judgment, target: ReviewJob, canonical: ReviewJob) -> AIFie
     elif hourly and annual_min is not None and annual_max is not None:
         annual_min *= 2080
         annual_max *= 2080
+    if pay.unit == "annual" and annual_max is not None and annual_max < MIN_PLAUSIBLE_ANNUAL:
+        annual_min = annual_max = None
     score = result.base_score
     notes = result.notes.strip()
     details: list[str] = []
@@ -416,13 +419,17 @@ def review_rows(store: Store, ws: gspread.Worksheet, config: ReviewConfig, *, dr
                                         (job.job_id, fingerprint, policy)).fetchone()
             result = Judgment.model_validate_json(cached["result"]) if cached else judge(job, group, config)
             validate_references(result, job, group)
-            # Never overwrite a member of an already confirmed group with a
-            # conflicting canonical. Leave this job pending for another review.
+            # Never overwrite a member of an already confirmed group with a conflicting
+            # canonical. Publish this job on its own instead, leaving other members' results
+            # untouched, so it does not stay pending and get re-judged on every run.
             for member_id in {result.canonical_job_id, *result.duplicate_job_ids}:
                 member = store.conn.execute("SELECT result FROM ai_results WHERE job_id=? AND fingerprint=? AND policy=?",
                                             (member_id, fingerprint, policy)).fetchone()
                 if member and Judgment.model_validate_json(member["result"]).canonical_job_id != result.canonical_job_id:
-                    raise ValueError(f"Conflicting duplicate canonical for Job ID {member_id}")
+                    log.warning("Job ID %s: canonical %s conflicts with the saved result for %s; publishing it standalone",
+                                job.job_id, result.canonical_job_id, member_id)
+                    result = result.model_copy(update={"canonical_job_id": job.job_id, "duplicate_job_ids": []})
+                    break
             # A newly confirmed duplicate inherits an existing canonical judgment,
             # including when its canonical was published in an earlier capped run.
             known = store.conn.execute("SELECT result FROM ai_results WHERE job_id=? AND fingerprint=? AND policy=?",

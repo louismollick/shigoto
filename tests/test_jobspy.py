@@ -12,7 +12,7 @@ from shigoto.db import Store
 from shigoto.normalize import CityMatcher
 from shigoto.pipeline import ingest
 from shigoto.sources import build_sources
-from shigoto.sources.jobspy_source import JobSpySource, row_to_job
+from shigoto.sources.jobspy_source import _PROXY_ATTEMPTS, JobSpySource, row_to_job
 
 
 @pytest.fixture
@@ -80,7 +80,7 @@ def test_failed_pass_does_not_checkpoint_but_still_rotates(store: Store, monkeyp
         if len(calls) == 2:
             if raises:
                 raise ValueError(f"Search failed: {failure}")
-            logging.getLogger("JobSpy:LinkedIn").error("Search failed: %s", failure)
+            logging.getLogger("jobspy.linkedin").error("Search failed: %s", failure)
         # A logged failure can return partial results; skip that query's records.
         return pd.DataFrame([{"site": "linkedin", "id": f"li-{len(calls)}", "job_url": "https://example.com/1",
                               "title": "QA technician"}])
@@ -271,7 +271,7 @@ def test_proxy_only_for_opted_in_sites(store: Store, monkeypatch: pytest.MonkeyP
     assert proxies == [expected, expected]  # one search per term
 
 
-@pytest.mark.parametrize(("failures", "found"), [(2, True), (3, False)])
+@pytest.mark.parametrize(("failures", "found"), [(_PROXY_ATTEMPTS - 1, True), (_PROXY_ATTEMPTS, False)])
 def test_proxied_search_retries_blocks(store: Store, monkeypatch: pytest.MonkeyPatch, failures: int,
                                        found: bool) -> None:
     calls: list[object] = []
@@ -279,7 +279,7 @@ def test_proxied_search_retries_blocks(store: Store, monkeypatch: pytest.MonkeyP
     def scrape(**kwargs: object) -> pd.DataFrame:
         calls.append(kwargs["search_term"])
         if len(calls) <= failures:
-            logging.getLogger("JobSpy:LinkedIn").error("LinkedIn response status code 429")
+            logging.getLogger("jobspy.linkedin").error("LinkedIn response status code 429")
             return pd.DataFrame()
         return pd.DataFrame([{"site": "linkedin", "id": f"li-{len(calls)}", "job_url": "https://example.com/1",
                               "title": "QA technician"}])
@@ -290,12 +290,14 @@ def test_proxied_search_retries_blocks(store: Store, monkeypatch: pytest.MonkeyP
     adapter = source(store, JobSpySite(site="linkedin", use_proxy=True, delay_seconds=0))
     jobs = list(adapter.fetch())
     if found:
-        # Two blocked attempts, then the first term succeeds and the second term runs normally.
-        assert calls == ["lab", "lab", "lab", "QA"] and [j.source_id for j in jobs] == ["li-3", "li-4"]
+        # Blocked attempts, then the first term succeeds on its last try and the second term runs normally.
+        assert calls == ["lab"] * _PROXY_ATTEMPTS + ["QA"]
+        assert [j.source_id for j in jobs] == [f"li-{_PROXY_ATTEMPTS}", f"li-{_PROXY_ATTEMPTS + 1}"]
         assert not adapter.incomplete
     else:
-        # Three blocked attempts exhaust the retries; the pass is incomplete but the next term still runs.
-        assert calls == ["lab", "lab", "lab", "QA"] and [j.source_id for j in jobs] == ["li-4"]
+        # Blocked attempts exhaust the retries; the pass is incomplete but the next term still runs.
+        assert calls == ["lab"] * _PROXY_ATTEMPTS + ["QA"]
+        assert [j.source_id for j in jobs] == [f"li-{_PROXY_ATTEMPTS + 1}"]
         assert adapter.incomplete
 
 
@@ -306,7 +308,7 @@ def test_proxied_search_keeps_partial_rows_across_attempts(store: Store, monkeyp
         nonlocal calls
         calls += 1
         # Each attempt gets a few pages before a 429; later attempts overlap earlier ones.
-        logging.getLogger("JobSpy:LinkedIn").error("LinkedIn response status code 429")
+        logging.getLogger("jobspy.linkedin").error("LinkedIn response status code 429")
         ids = {1: [1, 2], 2: [1, 2, 3], 3: [1]}.get(calls, [])
         return pd.DataFrame([{"site": "linkedin", "id": f"li-{i}", "job_url": f"https://example.com/{i}",
                               "title": "QA technician"} for i in ids])
