@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
+import requests
+
 from shigoto.config import WorkdayBoard
 from shigoto.http import PoliteSession, posting_liveness
 from shigoto.models import Job, Liveness
@@ -155,17 +157,31 @@ class WorkdaySource:
 
 
 def check_liveness(url: str, source_id: str) -> Liveness:
-    """Convert the public posting path, with or without a locale, to its CXS detail URL."""
+    """Convert the public posting path, with or without a locale, to its CXS detail URL.
+
+    Some tenants' `externalUrl`s use a shared host (`wd3.myworkdaysite.com/recruiting/{tenant}/{site}/job/...`)
+    whose robots.txt is unreadable; those are checked on the board host from `source_id` instead.
+    """
     parsed = urlparse(url)
+    host = parsed.hostname or ""
     parts = [part for part in parsed.path.split("/") if part]
-    if "job" not in parts or not parsed.hostname or not parsed.hostname.endswith(".myworkdayjobs.com"):
+    if "job" not in parts or parts.index("job") in (0, len(parts) - 1):
         return "unknown"
     index = parts.index("job")
-    if index < 1 or index == len(parts) - 1:
+    if host.endswith(".myworkdaysite.com") and index >= 3 and parts[index - 3] == "recruiting":
+        host = source_id.split(":")[0]
+    if not host.endswith(".myworkdayjobs.com"):
         return "unknown"
-    ep = endpoint(f"https://{parsed.hostname}/{parts[index - 1]}")
-    detail_url = f"{ep.detail_base}/{'/'.join(parts[index:])}"
-    return posting_liveness(_session, detail_url, lambda r: workday_alive(r.json()))
+    detail_url = f"{endpoint(f'https://{host}/{parts[index - 1]}').detail_base}/{'/'.join(parts[index:])}"
+    return posting_liveness(_session, detail_url, lambda r: workday_alive(r.json()), workday_unposted)
+
+
+def workday_unposted(response: requests.Response) -> bool:
+    """Workday answers 403 S22 "permission denied" for a requisition that is no longer posted."""
+    try:
+        return response.status_code == 403 and response.json().get("errorCode") == "S22"
+    except (ValueError, AttributeError):
+        return False
 
 
 def workday_alive(data: object) -> bool:

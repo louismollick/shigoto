@@ -346,7 +346,7 @@ def test_new_worksheet_header_and_format(monkeypatch: pytest.MonkeyPatch, tmp_pa
             assert key == "sheet-id"
             return FakeSpreadsheet()
 
-    def service_account(filename: str) -> FakeClient:
+    def service_account(filename: str, http_client: object) -> FakeClient:
         assert filename == str(tmp_path / "credentials.json")
         return FakeClient()
 
@@ -369,7 +369,7 @@ def test_review_cannot_create_a_missing_worksheet(monkeypatch: pytest.MonkeyPatc
         def open_by_key(self, key: str) -> FakeSpreadsheet:
             return FakeSpreadsheet()
 
-    monkeypatch.setattr(gspread, "service_account", lambda filename: FakeClient())
+    monkeypatch.setattr(gspread, "service_account", lambda filename, http_client: FakeClient())
     with pytest.raises(gspread.WorksheetNotFound):
         open_worksheet(tmp_path / "credentials.json", SheetConfig(spreadsheet_id="sheet-id"), create=False)
 
@@ -416,7 +416,7 @@ def test_explicit_worksheet_id_survives_rename_and_never_falls_back(
         def open_by_key(self, key: str) -> FakeSpreadsheet:
             return FakeSpreadsheet()
 
-    monkeypatch.setattr(gspread, "service_account", lambda filename: FakeClient())
+    monkeypatch.setattr(gspread, "service_account", lambda filename, http_client: FakeClient())
     config = SheetConfig(spreadsheet_id="sheet-id", worksheet="Renamed master", worksheet_id=0)
     if missing:
         with pytest.raises(gspread.WorksheetNotFound):

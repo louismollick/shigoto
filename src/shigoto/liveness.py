@@ -1,5 +1,6 @@
 """Confirm postings are gone before marking jobs closed.
 
+An employer's full listing (Workday, Greenhouse, ...) is authoritative when it answers.
 Indeed is checked in batches up front. Other sources cost one request per posting,
 capped by `liveness_max_per_run`; LinkedIn checks stop for the run at the first
 inconclusive answer, which is usually a rate limit.
@@ -11,7 +12,7 @@ import logging
 from collections.abc import Callable
 
 from shigoto.config import Config
-from shigoto.db import SourceLink, Store, now_iso
+from shigoto.db import FULL_LISTING_SOURCES, SourceLink, Store, now_iso
 from shigoto.models import Liveness
 from shigoto.sources import ats, indeed, jobbank, linkedin_detail, successfactors, workday
 
@@ -53,8 +54,11 @@ def check_liveness(store: Store, config: Config) -> dict[str, int]:
     for target in targets:
         # Empty sources: all links are uncheckable and have been unseen for 30 days.
         result: Liveness | None = "gone"  # None: out of request budget
-        # Free Indeed answers first; any source that isn't gone settles the job.
-        for link in sorted(target.sources, key=lambda link: link.source != "indeed"):
+        # The employer's own full listing settles the job either way, even when aggregators
+        # still list a posting it removed. Then free Indeed answers; any other source that
+        # isn't gone settles the job.
+        for link in sorted(target.sources, key=lambda link: (link.source not in FULL_LISTING_SOURCES,
+                                                             link.source != "indeed")):
             if link.source == "indeed":
                 value = indeed_results.get(link.source_id, "unknown")
             elif budget == 0 or (link.source == "linkedin" and linkedin_blocked):
@@ -64,7 +68,7 @@ def check_liveness(store: Store, config: Config) -> dict[str, int]:
                 budget -= 1
                 value = check_source(link)
                 linkedin_blocked |= link.source == "linkedin" and value == "unknown"
-            if value != "gone":
+            if value != "gone" or link.source in FULL_LISTING_SOURCES:
                 result = value
                 break
         if result is None:

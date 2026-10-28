@@ -86,6 +86,31 @@ def test_workday_detail_endpoint(monkeypatch: MonkeyPatch, locale: str) -> None:
     assert calls == ["https://saputo.wd5.myworkdayjobs.com/wday/cxs/saputo/Careers/job/Toronto/QA_R1"]
 
 
+def test_workday_shared_host_endpoint(monkeypatch: MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def request(method: str, url: str, **kwargs: object) -> requests.Response:
+        calls.append(url)
+        return response(url, {"jobPostingInfo": {"title": "QA", "jobReqId": "R1"}}, 200)
+
+    monkeypatch.setattr(workday._session, "request", request)
+    url = "https://wd3.myworkdaysite.com/recruiting/mdlz/External/job/Toronto-Canada/QA_R1"
+    assert workday.check_liveness(url, "mdlz.wd3.myworkdayjobs.com:R1") == "alive"
+    assert calls == ["https://mdlz.wd3.myworkdayjobs.com/wday/cxs/mdlz/External/job/Toronto-Canada/QA_R1"]
+
+
+@pytest.mark.parametrize("data,expected", [({"errorCode": "S22", "httpStatus": 403}, "gone"),
+                                           ({"errorCode": "S1", "httpStatus": 403}, "unknown"), ("denied", "unknown")])
+def test_workday_unposted_requisition_is_gone(monkeypatch: MonkeyPatch, data: object, expected: Liveness) -> None:
+    def request(method: str, url: str, **kwargs: object) -> requests.Response:
+        result = response(url, data, 403)
+        result.raise_for_status()
+        return result
+
+    monkeypatch.setattr(workday._session, "request", request)
+    assert workday.check_liveness("https://saputo.wd5.myworkdayjobs.com/Careers/job/Toronto/QA_R1", "saputo:R1") == expected
+
+
 @pytest.mark.parametrize("data,expected", [
     ({"jobs": [{"id": "1", "title": "QA", "isListed": False}]}, "alive"),
     ({"jobs": [{"id": "2", "title": "QA"}]}, "gone"), ({"jobs": []}, "gone"),
@@ -109,10 +134,10 @@ def test_ashby_board_failure_is_unknown(monkeypatch: MonkeyPatch, status: int) -
 
 
 @pytest.mark.parametrize("other,result", [("gone", "Closed"), ("unknown", ""), ("alive", "")])
-def test_every_source_must_confirm_gone(monkeypatch: MonkeyPatch, tmp_path: Path, other: Liveness, result: str) -> None:
+def test_every_aggregator_must_confirm_gone(monkeypatch: MonkeyPatch, tmp_path: Path, other: Liveness, result: str) -> None:
     config = Config(search_terms=[], cities=[], title_keywords=[], sheet=SheetConfig())
     store = Store(tmp_path / "t.db")
-    for source in ["greenhouse", "lever"]:
+    for source in ["jobbank", "linkedin"]:
         store.upsert(Job(source=source, source_id=f"board:{source}", url=f"https://example.com/{source}",
                          title="QA", company="Acme", location="Toronto", city="Toronto"), "2026-10-01T12:00:00+00:00")
     store.commit()
@@ -120,14 +145,37 @@ def test_every_source_must_confirm_gone(monkeypatch: MonkeyPatch, tmp_path: Path
 
     def check(link: SourceLink) -> Liveness:
         calls.append(link)
-        return "gone" if link.source == "greenhouse" else other
+        return "gone" if link.source == "jobbank" else other
 
     monkeypatch.setattr("shigoto.liveness.check_source", check)
     monkeypatch.setattr("shigoto.liveness.now_iso", lambda: "2026-10-04T12:00:00+00:00")
     assert check_liveness(store, config) == {"liveness_checked": 1, "closed": int(result == "Closed")}
     assert store.visible_jobs()[0].status == result
-    assert [link.url for link in calls] == ["https://example.com/greenhouse", "https://example.com/lever"]
+    assert [link.url for link in calls] == ["https://example.com/jobbank", "https://example.com/linkedin"]
     assert check_liveness(store, config) == {"liveness_checked": 0, "closed": 0}
+
+
+@pytest.mark.parametrize("employer,result", [("gone", "Closed"), ("unknown", ""), ("alive", "")])
+def test_full_listing_answer_settles_job(monkeypatch: MonkeyPatch, tmp_path: Path, employer: Liveness,
+                                         result: str) -> None:
+    """Aggregators keep listing postings employers removed, so the employer's board decides."""
+    config = Config(search_terms=[], cities=[], title_keywords=[], sheet=SheetConfig())
+    store = Store(tmp_path / "t.db")
+    add(store, "indeed", "in-1", "QA")
+    add(store, "linkedin", "li-1", "QA")
+    add(store, "workday", "acme:R1", "QA")
+    store.commit()
+    calls: list[str] = []
+
+    def check(link: SourceLink) -> Liveness:
+        calls.append(link.source)
+        return employer if link.source == "workday" else "alive"
+
+    monkeypatch.setattr("shigoto.liveness.check_source", check)
+    monkeypatch.setattr(indeed, "check_liveness", lambda ids: {"in-1": "alive"})
+    monkeypatch.setattr("shigoto.liveness.now_iso", lambda: "2026-10-04T12:00:00+00:00")
+    assert check_liveness(store, config) == {"liveness_checked": 1, "closed": int(result == "Closed")}
+    assert store.visible_jobs()[0].status == result and calls == ["workday"]
 
 
 def test_dispatcher_unknown_source() -> None:

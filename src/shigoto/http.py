@@ -140,13 +140,16 @@ def _retry_after(resp: requests.Response) -> float | None:
     return min(float(value), 300.0) if value.isdigit() else None
 
 
-def posting_liveness(session: PoliteSession, url: str,
-                     is_alive: Callable[[requests.Response], bool]) -> Liveness:
-    """Only a posting's 404/410 is proof of removal; other failures are inconclusive."""
+def posting_liveness(session: PoliteSession, url: str, is_alive: Callable[[requests.Response], bool],
+                     is_gone: Callable[[requests.Response], bool] = lambda response: False) -> Liveness:
+    """A posting's 404/410, or another error response `is_gone` recognizes, proves removal.
+
+    Other failures are inconclusive.
+    """
     try:
         response = session.request("GET", url, respect_robots=True)
     except requests.HTTPError as exc:
-        if exc.response is not None and exc.response.status_code in (404, 410):
+        if exc.response is not None and (exc.response.status_code in (404, 410) or is_gone(exc.response)):
             return "gone"
         return "unknown"
     except (requests.RequestException, RateLimited, RobotsDisallowed):

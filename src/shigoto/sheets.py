@@ -47,7 +47,9 @@ def reviewer_value(name: str, value: str) -> str | int:
 
 
 def open_worksheet(credentials: Path, config: SheetConfig, *, create: bool = True) -> gspread.Worksheet:
-    client = gspread.service_account(filename=str(credentials))
+    # A full rebuild makes ~5 writes per 200-row chunk, which can exceed the 60 writes/minute
+    # quota; the backoff client retries 429s and 5xx errors with exponential waits up to 128s.
+    client = gspread.service_account(filename=str(credentials), http_client=gspread.BackOffHTTPClient)
     spreadsheet = client.open_by_key(config.spreadsheet_id)
     # An explicit ID survives renames and must never fall back to another tab.
     if config.worksheet_id is not None:
