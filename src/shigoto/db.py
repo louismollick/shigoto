@@ -318,7 +318,10 @@ class Store:
         self.conn.commit()
 
     def liveness_candidates(self, now: str) -> list[LivenessTarget]:
-        """Open jobs due for closure checks, stalest first, checked at most once per day.
+        """Open jobs due for closure checks, at most once per day.
+
+        Least recently checked go first, then stalest. Ordering by staleness alone let stale jobs
+        that keep answering "alive" use the request budget every day and starve the rest.
 
         Full-listing sources must also be missing from their listings for CLOSED_AFTER;
         a recent sighting there already proves the job is open. Uncheckable links are
@@ -339,7 +342,7 @@ class Store:
                         THEN coalesce(max(CASE WHEN s.source IN ({",".join("?" * len(full))})
                                           THEN julianday(s.last_seen) END), 0) < julianday(?)
                         ELSE max(julianday(s.last_seen)) <= julianday(?) END
-                ORDER BY max(julianday(s.last_seen)), j.job_id""",
+                ORDER BY coalesce(julianday(j.liveness_checked_at), 0), max(julianday(s.last_seen)), j.job_id""",
             (checked_cutoff, *supported, *checkable, *full, cutoff, uncheckable_cutoff),
         ).fetchall()
         return [LivenessTarget(row["job_id"], [

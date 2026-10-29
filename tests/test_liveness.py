@@ -339,3 +339,17 @@ def test_uncheckable_only_closes_after_30_days_without_requests(monkeypatch: Mon
     assert check_liveness(store, config) == {"liveness_checked": 0, "closed": 0}
     assert store.visible_jobs()[0].status == ""
     store.close()
+
+
+def test_least_recently_checked_go_first(tmp_path: Path) -> None:
+    """A stale job that keeps answering alive must not stay ahead of never-checked jobs."""
+    store = Store(tmp_path / "t.db")
+    add(store, "jobbank", "jb-stale", "QA A")
+    store.upsert(Job(source="jobbank", source_id="jb-newer", url="https://example.com/jb-newer", title="QA B",
+                     company="Acme", location="Toronto", city="Toronto"), "2026-10-02T12:00:00+00:00")
+    store.commit()
+    now = "2026-10-06T12:00:00+00:00"
+    stale = next(t.job_id for t in store.liveness_candidates(now) if t.sources[0].source_id == "jb-stale")
+    assert [t.sources[0].source_id for t in store.liveness_candidates(now)] == ["jb-stale", "jb-newer"]
+    store.record_liveness(stale, "alive", "2026-10-04T12:00:00+00:00")
+    assert [t.sources[0].source_id for t in store.liveness_candidates(now)] == ["jb-newer", "jb-stale"]
