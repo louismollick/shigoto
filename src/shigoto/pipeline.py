@@ -13,7 +13,7 @@ from shigoto.models import job_from_json, job_json
 from shigoto.normalize import CityMatcher, normalize, rejection_reason
 from shigoto.review import review
 from shigoto.sheet_controls import configure_tracker
-from shigoto.sheets import open_worksheet, sync
+from shigoto.sheets import open_worksheet, sync, sync_status
 from shigoto.sources import Source, build_sources
 from shigoto.sources.jobspy_source import JobSpySource
 
@@ -54,6 +54,29 @@ def run_once(config: Config, *, sync_sheet: bool = True, only: set[str] | None =
         store.finish_run(run_id, now_iso(), dict(stats))
         store.close()
     log.info("run finished: %s", dict(stats))
+    return dict(stats)
+
+
+def tick(config: Config, *, sync_sheet: bool = True, review_due: bool = False) -> dict[str, int]:
+    """Between scrapes: a small batch of closure checks, Status cells that differ from SQLite, and
+    (when `review_due`) a review pass over the existing sheet."""
+    store = Store(config.db_path)
+    try:
+        stats: Counter[str] = Counter(check_liveness(store, config, budget=config.liveness_max_per_tick))
+        # Reconcile every tick, so a failed Status write is repaired on the next one.
+        if sync_sheet:
+            if config.google_credentials is None or not config.sheet.spreadsheet_id:
+                raise RuntimeError("GOOGLE_APPLICATION_CREDENTIALS and SHIGOTO_SPREADSHEET_ID must be set")
+            ws = open_worksheet(config.google_credentials, config.sheet, create=False)
+            if updated := sync_status(store, ws):
+                stats["status_updated"] = updated
+                configure_tracker(ws)  # reapply the filter so newly closed rows hide
+    finally:
+        store.close()
+    if sync_sheet and review_due and config.review.enabled:
+        report = review(config)
+        stats.update(report.stats())
+        log.info("AI review: %s", report.model_dump_json())
     return dict(stats)
 
 

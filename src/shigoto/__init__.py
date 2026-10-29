@@ -4,7 +4,7 @@ CLI:
   shigoto run [--no-sheet] [--only linkedin,indeed,...]   one run, then exit
   shigoto reprocess [--no-sheet]                      replay saved source records
   shigoto review [--dry-run] [--job ID] [--limit N]     review without scraping or rebuilding
-  shigoto serve                                            run every `interval_hours`, forever
+  shigoto serve                                            run every `interval_hours`, ticking in between
 """
 
 from __future__ import annotations
@@ -21,10 +21,11 @@ from pathlib import Path
 
 from shigoto.config import Config, load_config
 from shigoto.db import Store
-from shigoto.pipeline import reprocess, run_once
+from shigoto.pipeline import reprocess, run_once, tick
 from shigoto.review import review
 
 log = logging.getLogger("shigoto")
+REVIEW_RETRY = timedelta(hours=1)
 
 
 @contextmanager
@@ -77,20 +78,38 @@ def main() -> None:
 
 def serve(config: Config, sync_sheet: bool) -> None:
     """Scheduler loop. The next run is due `interval_hours` after the last finished run
-    in the DB, so container restarts don't trigger extra scrapes."""
-    interval = timedelta(hours=config.interval_hours)
+    in the DB, so container restarts don't trigger extra scrapes. While waiting, a tick every
+    `tick_minutes` checks closures and, at most hourly, retries reviews."""
+    interval, step = timedelta(hours=config.interval_hours), timedelta(minutes=config.tick_minutes)
+    last_review = datetime.now().astimezone()
+    announced = None
     while True:
         store = Store(config.db_path)
         last = store.last_finished_run()
         store.close()
         due = datetime.fromisoformat(last) + interval if last else datetime.now().astimezone()
-        wait = (due - datetime.now().astimezone()).total_seconds()
-        if wait > 0:
-            log.info("next run at %s", due.isoformat(timespec="seconds"))
-            time.sleep(wait)
+        now = datetime.now().astimezone()
+        if due > now:
+            if due != announced:
+                log.info("next run at %s", due.isoformat(timespec="seconds"))
+                announced = due
+            time.sleep(min(step, due - now).total_seconds())
+            if datetime.now().astimezone() >= due:
+                continue
+            review_due = datetime.now().astimezone() - last_review >= REVIEW_RETRY
+            try:
+                with run_lock(config):
+                    if review_due:
+                        last_review = datetime.now().astimezone()
+                    stats = tick(config, sync_sheet=sync_sheet, review_due=review_due)
+                log.info("tick: %s", stats)
+            except Exception:
+                log.exception("tick failed")
+            continue
         try:
             with run_lock(config):
                 run_once(config, sync_sheet=sync_sheet)
+            last_review = datetime.now().astimezone()
         except Exception:
             log.exception("run failed")
             time.sleep(600)  # don't hot-loop on a persistent failure

@@ -18,6 +18,9 @@ US_STATES = (
 ).split()
 _FOREIGN_WORDS = re.compile(r"\b(united states|usa|united kingdom|england)\b")
 _US_STATE_CODE = re.compile(rf",\s*({'|'.join(US_STATES)})\b")  # case-sensitive: "Vancouver, WA"
+# Indeed switched from "Toronto, ON, CA" to "Toronto, ON, Canada" in Oct 2026; one spelling keeps
+# re-sightings from looking like edits that queue another AI review.
+_PROVINCE_CA = re.compile(r"(,\s*(?:AB|BC|MB|NB|NL|NS|NT|NU|ON|PE|QC|SK|YT)),\s*CA$")
 
 
 def fold(text: str) -> str:
@@ -74,7 +77,7 @@ def normalize(job: Job, matcher: CityMatcher, title_keywords: list[str],
     job.company = clean(job.company)
     if not job.city:
         job.city = matcher.match(job.location) or ""
-    job.location = clean(job.location)
+    job.location = _PROVINCE_CA.sub(r"\1, Canada", clean(job.location))
     job.salary = clean(job.salary)
     job.job_type = clean(job.job_type)
     job.description = clean_description(job.description)
@@ -82,7 +85,13 @@ def normalize(job: Job, matcher: CityMatcher, title_keywords: list[str],
     return job if reason is None else None
 
 
-RejectionReason = Literal["location", "title", "excluded_title", "company"]
+def part_time_only(job_type: str) -> bool:
+    """Part-time without a full-time option ("parttime", "Part-time, Contract"): always a Casual Role."""
+    compact = re.sub(r"[^a-z]", "", fold(job_type))
+    return "parttime" in compact and "fulltime" not in compact
+
+
+RejectionReason = Literal["location", "title", "excluded_title", "company", "job_type"]
 
 
 def rejection_reason(job: Job, title_keywords: list[str], exclude_title_keywords: list[str],
@@ -97,6 +106,8 @@ def rejection_reason(job: Job, title_keywords: list[str], exclude_title_keywords
         return "excluded_title"
     if title_matches(job.company, exclude_companies):
         return "company"
+    if part_time_only(job.job_type):
+        return "job_type"
     return None
 
 

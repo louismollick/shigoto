@@ -43,12 +43,13 @@ def check_source(link: SourceLink) -> Liveness:
         return "unknown"
 
 
-def check_liveness(store: Store, config: Config) -> dict[str, int]:
+def check_liveness(store: Store, config: Config, budget: int | None = None) -> dict[str, int]:
+    """Check due jobs with `budget` per-posting requests, default `liveness_max_per_run`."""
     now = now_iso()
     targets = store.liveness_candidates(now)
     indeed_ids = [link.source_id for target in targets for link in target.sources if link.source == "indeed"]
     indeed_results = indeed.check_liveness(indeed_ids) if indeed_ids else {}
-    budget = config.liveness_max_per_run
+    budget = config.liveness_max_per_run if budget is None else budget
     linkedin_blocked = False
     checked = closed = 0
     for target in targets:

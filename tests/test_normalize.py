@@ -79,7 +79,7 @@ def test_multi_location_foreign_component_does_not_veto(separator: str, reverse:
         parts.reverse()
     location = separator.join(parts)
     assert matcher.match(location) == "Toronto"
-    normalized = normalize(job(location=location), matcher, ["QA"], [], [])
+    normalized = normalize(job(location=location, city="Toronto"), matcher, ["QA"], [], [])
     assert normalized is not None and normalized.city == "Toronto"
     assert matcher.match(separator.join(["Vancouver, WA", "Ottawa, IL"])) is None
 
@@ -137,3 +137,22 @@ def test_title_exception_applies_only_to_its_keyword() -> None:
     assert not title_excluded("Senior Technician", ["senior"], exceptions)
     assert title_excluded("Senior Technician Supervisor", ["senior", "supervisor"], exceptions)
     assert title_excluded("Senior Technician", ["senior"])
+
+
+@pytest.mark.parametrize("location,expected", [
+    ("Toronto, ON, CA", "Toronto, ON, Canada"), ("Toronto, ON, Canada", "Toronto, ON, Canada"),
+    ("San Diego, CA", "San Diego, CA"), ("Mississauga, ON, CA, L5N", "Mississauga, ON, CA, L5N"),
+])
+def test_indeed_country_suffix_has_one_spelling(location: str, expected: str) -> None:
+    normalized = normalize(job(location=location, city="Toronto"), matcher, ["QA"], [], [])
+    assert normalized is not None and normalized.location == expected
+
+
+@pytest.mark.parametrize("job_type,dropped", [
+    ("parttime", True), ("Part-time, Contract", True), ("temporary, parttime", True),
+    ("parttime, fulltime", False), ("Full-time", False), ("", False), ("contract", False),
+])
+def test_part_time_only_job_type_is_rejected(job_type: str, dropped: bool) -> None:
+    posting = job(job_type=job_type)
+    assert (normalize(posting, matcher, ["QA"], [], []) is None) == dropped
+    assert rejection_reason(posting, ["QA"], [], []) == ("job_type" if dropped else None)

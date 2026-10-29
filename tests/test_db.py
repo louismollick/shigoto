@@ -425,3 +425,41 @@ def test_rejected_prune_uses_last_sighting_and_offsets(tmp_path: Path) -> None:
     row = store.conn.execute("SELECT * FROM rejected_postings").fetchone()
     assert row["first_seen"] == "2026-08-01T12:00:00+00:00" and row["reason"] == "company"
     assert store.prune_rejected("2026-10-13T12:00:00+00:00") == 0
+
+
+def test_alive_answers_back_off_up_to_four_days(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(source="jobbank"), "2026-10-01T12:00:00+00:00")
+    store.commit()
+    [candidate] = store.liveness_candidates("2026-10-01T12:00:00+00:00")
+    checked = "2026-10-02T12:00:00+00:00"
+    for streak, wait_days in [(1, 1), (2, 2), (3, 4), (4, 4)]:
+        store.record_liveness(candidate.job_id, "alive", checked)
+        due = date.fromisoformat(checked[:10]).toordinal() + wait_days
+        before, at = (date.fromordinal(due - 1).isoformat() + "T12:00:00+00:00",
+                      date.fromordinal(due).isoformat() + "T12:00:00+00:00")
+        assert store.liveness_candidates(before) == [], streak
+        assert len(store.liveness_candidates(at)) == 1, streak
+        checked = at
+    store.record_liveness(candidate.job_id, "unknown", checked)  # inconclusive keeps the streak
+    assert store.conn.execute("SELECT liveness_alive_streak FROM jobs").fetchone()[0] == 4
+
+
+def test_part_time_job_type_is_excluded_and_rejected_table_migrates(tmp_path: Path) -> None:
+    path = tmp_path / "t.db"
+    old = sqlite3.connect(path)
+    old.execute("""CREATE TABLE rejected_postings (source TEXT NOT NULL, source_id TEXT NOT NULL, raw TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (reason IN ('location', 'title', 'excluded_title', 'company')),
+        first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, PRIMARY KEY (source, source_id))""")
+    old.execute("INSERT INTO rejected_postings VALUES ('indeed', '1', '{}', 'title', 'a', 'b')")
+    old.commit()
+    old.close()
+    store = Store(path)
+    store.reject(job(source_id="2"), "{}", "job_type", "2026-10-01T12:00:00+00:00")
+    assert [r[0] for r in store.conn.execute("SELECT reason FROM rejected_postings ORDER BY source_id")] == \
+        ["title", "job_type"]
+    store.upsert(job(job_type="parttime"), "2026-10-01T12:00:00+00:00")
+    store.commit()
+    config = Config(search_terms=[], cities=[City(name="Toronto", jobspy_location="Toronto")],
+                    title_keywords=["QA"], sheet=SheetConfig())
+    assert store.reevaluate_exclusions(config, "2026-10-01T12:00:00+00:00") == 1

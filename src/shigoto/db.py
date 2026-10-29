@@ -20,7 +20,7 @@ from typing import Literal
 
 from shigoto.config import Config
 from shigoto.models import Job, Liveness, job_json
-from shigoto.normalize import RejectionReason, dedupe_key, title_excluded, title_matches
+from shigoto.normalize import RejectionReason, dedupe_key, part_time_only, title_excluded, title_matches
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS rejected_postings (
     source TEXT NOT NULL,
     source_id TEXT NOT NULL,
     raw TEXT NOT NULL,
-    reason TEXT NOT NULL CHECK (reason IN ('location', 'title', 'excluded_title', 'company')),
+    reason TEXT NOT NULL CHECK (reason IN ('location', 'title', 'excluded_title', 'company', 'job_type')),
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL,
     PRIMARY KEY (source, source_id)
@@ -170,6 +170,16 @@ class Store:
         for column in ("closed_at", "liveness_checked_at", "excluded_at", "description_attempted_at"):
             if column not in columns:
                 self.conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
+        if "liveness_alive_streak" not in columns:
+            self.conn.execute("ALTER TABLE jobs ADD COLUMN liveness_alive_streak INTEGER NOT NULL DEFAULT 0")
+        rejected_sql = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='rejected_postings'").fetchone()["sql"]
+        if "'job_type'" not in rejected_sql:
+            # SQLite can't alter a CHECK constraint; rebuild the table with the current schema in one
+            # transaction, so an interrupted copy can't leave an empty table that looks migrated.
+            self.conn.executescript("BEGIN; ALTER TABLE rejected_postings RENAME TO rejected_postings_old;"
+                                    + SCHEMA + """INSERT INTO rejected_postings SELECT * FROM rejected_postings_old;
+                                    DROP TABLE rejected_postings_old; COMMIT;""")
         source_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(job_sources)")}
         if "raw" not in source_columns:
             self.conn.execute("ALTER TABLE job_sources ADD COLUMN raw TEXT")
@@ -318,10 +328,11 @@ class Store:
         self.conn.commit()
 
     def liveness_candidates(self, now: str) -> list[LivenessTarget]:
-        """Open jobs due for closure checks, at most once per day.
+        """Open jobs due for closure checks, least recently checked first, then stalest.
 
-        Least recently checked go first, then stalest. Ordering by staleness alone let stale jobs
-        that keep answering "alive" use the request budget every day and starve the rest.
+        A job is due a day after its last check; each consecutive "alive" answer beyond the first
+        doubles that wait, up to 4 days, so postings that stay open use fewer requests. Ordering by
+        staleness alone let stale jobs that keep answering "alive" use the budget and starve the rest.
 
         Full-listing sources must also be missing from their listings for CLOSED_AFTER;
         a recent sighting there already proves the job is open. Uncheckable links are
@@ -329,13 +340,13 @@ class Store:
         """
         cutoff = (datetime.fromisoformat(now) - CLOSED_AFTER).isoformat()
         uncheckable_cutoff = (datetime.fromisoformat(now) - UNCHECKABLE_CLOSED_AFTER).isoformat()
-        checked_cutoff = (datetime.fromisoformat(now) - timedelta(days=1)).isoformat()
         full, checkable = sorted(FULL_LISTING_SOURCES), sorted(FULL_LISTING_SOURCES | DIRECT_CHECK_SOURCES)
         supported = sorted(set(checkable) | UNCHECKABLE_SOURCES)
         rows = self.conn.execute(
             f"""SELECT j.job_id FROM jobs j JOIN job_sources s ON s.job_id=j.job_id
                 WHERE j.closed_at IS NULL AND (j.liveness_checked_at IS NULL
-                    OR julianday(j.liveness_checked_at) <= julianday(?))
+                    OR julianday(j.liveness_checked_at)
+                       <= julianday(?) - min(1 << max(j.liveness_alive_streak - 1, 0), 4))
                 GROUP BY j.job_id
                 HAVING min(s.source IN ({",".join("?" * len(supported))}))=1
                     AND CASE WHEN max(s.source IN ({",".join("?" * len(checkable))}))=1
@@ -343,7 +354,7 @@ class Store:
                                           THEN julianday(s.last_seen) END), 0) < julianday(?)
                         ELSE max(julianday(s.last_seen)) <= julianday(?) END
                 ORDER BY coalesce(julianday(j.liveness_checked_at), 0), max(julianday(s.last_seen)), j.job_id""",
-            (checked_cutoff, *supported, *checkable, *full, cutoff, uncheckable_cutoff),
+            (now, *supported, *checkable, *full, cutoff, uncheckable_cutoff),
         ).fetchall()
         return [LivenessTarget(row["job_id"], [
             SourceLink(s["source"], s["source_id"], s["url"])
@@ -355,9 +366,11 @@ class Store:
     def record_liveness(self, job_id: str, result: Liveness, now: str) -> None:
         """Status changes leave material content and its update timestamp untouched."""
         self.conn.execute(
-            """UPDATE jobs SET liveness_checked_at=?,
-               closed_at=CASE WHEN ?='gone' THEN ? ELSE closed_at END WHERE job_id=?""",
-            (now, result, now, job_id),
+            """UPDATE jobs SET liveness_checked_at=:now,
+               liveness_alive_streak=CASE :result WHEN 'alive' THEN liveness_alive_streak + 1
+                                                  WHEN 'gone' THEN 0 ELSE liveness_alive_streak END,
+               closed_at=CASE WHEN :result='gone' THEN :now ELSE closed_at END WHERE job_id=:job_id""",
+            {"now": now, "result": result, "job_id": job_id},
         )
         self.conn.commit()
 
@@ -386,11 +399,12 @@ class Store:
         cutoff = ((datetime.fromisoformat(now).date() - timedelta(days=config.max_posting_age_days)).isoformat()
                   if config.max_posting_age_days is not None else None)
         excluded = 0
-        for row in self.conn.execute("SELECT job_id, city, title, company, posted_date FROM jobs").fetchall():
+        for row in self.conn.execute("SELECT job_id, city, title, company, job_type, posted_date FROM jobs").fetchall():
             passes = (row["city"] in cities and title_matches(row["title"], config.title_keywords)
                       and not title_excluded(row["title"], config.exclude_title_keywords,
                                              config.exclude_title_exceptions)
                       and not title_matches(row["company"], config.exclude_companies)
+                      and not part_time_only(row["job_type"])
                       and (cutoff is None or not row["posted_date"] or row["posted_date"] >= cutoff))
             excluded += not passes
             self.conn.execute(

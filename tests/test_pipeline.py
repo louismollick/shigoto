@@ -1,15 +1,16 @@
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import date
 from pathlib import Path
 
 import pytest
 
 from shigoto import main, run_lock
-from shigoto.config import City, Config, SheetConfig
+from shigoto.config import City, Config, ReviewConfig, SheetConfig
 from shigoto.db import Store
 from shigoto.models import Job, job_from_json, job_json
 from shigoto.normalize import CityMatcher
+from shigoto import pipeline
 from shigoto.pipeline import ingest, reprocess, run_once
 from shigoto.review import ReviewReport
 
@@ -400,3 +401,31 @@ def test_ingest_commits_long_sources_periodically(tmp_path: Path) -> None:
 
     assert ingest(store, FakeSource(), CityMatcher(config.cities), config)["new"] == 150
     assert visible_mid_fetch == [99]
+
+
+@pytest.mark.parametrize("closed,review_due", [(0, False), (2, False), (0, True)])
+def test_tick_reconciles_status_and_reapplies_controls_only_on_change(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, closed: int, review_due: bool) -> None:
+    config = Config(search_terms=[], cities=[], title_keywords=[], sheet=SheetConfig(spreadsheet_id="sheet"),
+                    db_path=tmp_path / "t.db", google_credentials=tmp_path / "creds.json", liveness_max_per_tick=3,
+                    review=ReviewConfig(enabled=True))
+    calls: list[str] = []
+
+    def liveness(store: object, cfg: Config, budget: int | None = None) -> dict[str, int]:
+        calls.append(f"liveness:{budget}")
+        return {"liveness_checked": 5, "closed": closed}
+
+    monkeypatch.setattr(pipeline, "check_liveness", liveness)
+    def record(name: str, value: object = None) -> Callable[..., object]:
+        def call(*args: object, **kwargs: object) -> object:
+            calls.append(name)
+            return value
+        return call
+
+    monkeypatch.setattr(pipeline, "open_worksheet", record("open", object()))
+    monkeypatch.setattr(pipeline, "sync_status", record("status", closed))
+    monkeypatch.setattr(pipeline, "configure_tracker", record("controls"))
+    monkeypatch.setattr(pipeline, "review", record("review", ReviewReport()))
+    stats = pipeline.tick(config, review_due=review_due)
+    expected = ["liveness:3", "open", "status"] + (["controls"] if closed else []) + (["review"] if review_due else [])
+    assert calls == expected and stats["closed"] == closed

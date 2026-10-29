@@ -2,6 +2,8 @@
 
 interval_hours: 6
 liveness_max_per_run: 40  # per-posting closure checks per run; Indeed batch checks are free
+liveness_max_per_tick: 10  # more closure checks every tick_minutes between runs
+tick_minutes: 10
 max_posting_age_days: 180  # hide older dated postings; keep undated jobs; null disables the limit
 
 # Runs after a successful Sheet sync. Authenticate Codex once in its persistent CODEX_HOME.
@@ -141,7 +143,13 @@ exclude_title_keywords: [software, SDET, tester, game, games, QA automation, tes
                          data scientist, research scientist, postdoc*, post-doc*, professor, lecturer,
                          research chair, instructor*, tutor, tutors, electrical, automotive, aerospace, welding,
                          systems testing, system testing, business analyst, financial analyst, finance analyst,
-                         marketing analyst, marketing coordinator]
+                         marketing analyst, marketing coordinator,
+                         # 0 of 285 reviewed matches were Maybe/Recommend or applied to (Oct 28 audit):
+                         # hospital MLT postings, university TA and union-tagged postings, field biology,
+                         # clinical research and IT/data analyst roles.
+                         hospital, hematology, BCGEU, CUPE, TA, biologist, clinical research,
+                         research coordinator, business, support analyst, systems analyst, data analyst,
+                         AI, analyste]
 
 # Keep senior bench roles: "Senior Quality Lab Technician" (Mondelez) and "Senior QA Technician" (Sunrise
 # Soya) were Recommend-grade with no stated experience minimum. Other senior titles stay excluded.

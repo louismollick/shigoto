@@ -136,3 +136,25 @@ def sync(store: Store, ws: gspread.Worksheet, config: Config) -> dict[str, int]:
     store.finish_sheet_rebuild()
     log.info("sheet rebuild: %d rows, %d hidden, %d reviews backed up", len(jobs), hidden, len(reviews))
     return {"sheet_rows": len(jobs), "sheet_hidden": hidden, "reviews_backed_up": len(reviews)}
+
+
+def sync_status(store: Store, ws: gspread.Worksheet) -> int:
+    """Write only Status cells that differ from SQLite; a cheap stand-in for a rebuild between runs.
+
+    Skips the sheet while an interrupted rebuild is pending, since rows may not match their IDs yet.
+    """
+    if store.sheet_rebuild_pending():
+        return 0
+    if ws.row_values(1)[:len(APP_COLUMNS)] != APP_COLUMNS:
+        raise RuntimeError("Unrecognized sheet header: app columns must match APP_COLUMNS")
+    col = APP_COLUMNS.index("Status") + 1
+    ids, statuses = ws.col_values(1)[1:], ws.col_values(col)[1:]
+    closed = {row["job_id"] for row in store.conn.execute("SELECT job_id FROM jobs WHERE closed_at IS NOT NULL")}
+    updates = []
+    for i, job_id in enumerate(ids):
+        want, have = ("Closed" if job_id in closed else ""), (statuses[i] if i < len(statuses) else "")
+        if job_id and want != have:
+            updates.append({"range": rowcol_to_a1(i + 2, col), "values": [[want]]})
+    if updates:
+        ws.batch_update(updates, value_input_option=ValueInputOption.raw)
+    return len(updates)

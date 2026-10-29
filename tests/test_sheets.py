@@ -11,7 +11,7 @@ from gspread.utils import ValueInputOption, a1_to_rowcol
 from shigoto.config import City, Config, SheetConfig
 from shigoto.db import Store
 from shigoto.models import Job
-from shigoto.sheets import APP_COLUMNS, CHUNK, HEADER, job_row, open_worksheet, reviewer_value, sync
+from shigoto.sheets import APP_COLUMNS, CHUNK, HEADER, job_row, open_worksheet, reviewer_value, sync, sync_status
 
 
 class FakeWorksheet:
@@ -423,3 +423,39 @@ def test_explicit_worksheet_id_survives_rename_and_never_falls_back(
             open_worksheet(tmp_path / "credentials.json", config)
     else:
         assert open_worksheet(tmp_path / "credentials.json", config) is cast(gspread.Worksheet, ws)
+
+
+def test_sync_status_writes_only_changed_status_cells(tmp_path: Path) -> None:
+    config = config_for(tmp_path / "t.db")
+    store = Store(config.db_path)
+    for source_id in ["1", "2", "3"]:
+        store.upsert(posting(source_id, title=f"QA Technician {source_id}"), "2026-10-01T12:00:00+00:00")
+    store.commit()
+    ws = FakeWorksheet([])
+    rebuild(store, ws, config)
+    ids = [row[0] for row in ws.rows[1:]]
+    status = APP_COLUMNS.index("Status")
+    store.record_liveness(ids[0], "gone", "2026-10-04T12:00:00+00:00")
+    ws.rows[3][status] = "Closed"  # stale: reopened since the last rebuild
+    ws.writes.clear()
+
+    def row_values(row: int) -> list[str]:
+        return ws.rows[row - 1]
+
+    def col_values(col: int) -> list[str]:
+        values = [row[col - 1] if col - 1 < len(row) else "" for row in ws.rows]
+        while values and not values[-1]:
+            values.pop()  # gspread drops trailing blanks
+        return values
+
+    batches: list[list[dict[str, object]]] = []
+    fake = cast(gspread.Worksheet, ws)
+    setattr(ws, "row_values", row_values)
+    setattr(ws, "col_values", col_values)
+    setattr(ws, "batch_update", lambda data, value_input_option: batches.append(data))
+    assert sync_status(store, fake) == 2
+    letter = chr(ord("A") + status)
+    assert batches == [[{"range": f"{letter}2", "values": [["Closed"]]}, {"range": f"{letter}4", "values": [[""]]}]]
+    assert ws.writes == []
+    store.conn.execute("INSERT INTO meta (key, value) VALUES ('sheet_rebuild_pending', '1')")
+    assert sync_status(store, fake) == 0
