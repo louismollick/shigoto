@@ -328,7 +328,11 @@ class Store:
         self.conn.commit()
 
     def liveness_candidates(self, now: str) -> list[LivenessTarget]:
-        """Open jobs due for closure checks, least recently checked first, then stalest.
+        """Included open jobs due for closure checks, least recently checked first, then stalest.
+
+        Excluded jobs and current AI rejects spend no requests. Applied jobs remain eligible,
+        and a changed posting resumes checks until it has a current review again. Uncheckable-only
+        rejects still close after 30 days unseen, since that needs no request.
 
         A job is due a day after its last check; each consecutive "alive" answer beyond the first
         doubles that wait, up to 4 days, so postings that stay open use fewer requests. Ordering by
@@ -343,8 +347,10 @@ class Store:
         full, checkable = sorted(FULL_LISTING_SOURCES), sorted(FULL_LISTING_SOURCES | DIRECT_CHECK_SOURCES)
         supported = sorted(set(checkable) | UNCHECKABLE_SOURCES)
         rows = self.conn.execute(
-            f"""SELECT j.job_id FROM jobs j JOIN job_sources s ON s.job_id=j.job_id
-                WHERE j.closed_at IS NULL AND (j.liveness_checked_at IS NULL
+            f"""SELECT j.job_id, j.updated_at,
+                    max(s.source IN ({",".join("?" * len(checkable))})) AS has_checkable_source
+                FROM jobs j JOIN job_sources s ON s.job_id=j.job_id
+                WHERE j.excluded_at IS NULL AND j.closed_at IS NULL AND (j.liveness_checked_at IS NULL
                     OR julianday(j.liveness_checked_at)
                        <= julianday(?) - min(1 << max(j.liveness_alive_streak - 1, 0), 4))
                 GROUP BY j.job_id
@@ -354,14 +360,41 @@ class Store:
                                           THEN julianday(s.last_seen) END), 0) < julianday(?)
                         ELSE max(julianday(s.last_seen)) <= julianday(?) END
                 ORDER BY coalesce(julianday(j.liveness_checked_at), 0), max(julianday(s.last_seen)), j.job_id""",
-            (now, *supported, *checkable, *full, cutoff, uncheckable_cutoff),
+            (*checkable, now, *supported, *checkable, *full, cutoff, uncheckable_cutoff),
         ).fetchall()
+        reviews = self.reviews()
+        # Published AI decisions can be newer than the last Sheet backup. Unpublished results
+        # do not supersede it; a later backup also preserves manual decision edits and clears.
+        for result in self.conn.execute(
+            """SELECT a.job_id, a.fields FROM ai_results a LEFT JOIN reviews r ON r.job_id=a.job_id
+               WHERE a.written_at IS NOT NULL
+                   AND julianday(a.written_at) > coalesce(julianday(r.updated_at), 0)
+               ORDER BY julianday(a.written_at), a.rowid"""
+        ):
+            fields = json.loads(result["fields"])
+            reviews.setdefault(result["job_id"], {}).update({
+                "AI Decision": fields["decision"], "AI Reviewed At": fields["reviewed_at"],
+            })
+        targets = []
+        for row in rows:
+            review = reviews.get(row["job_id"], {})
+            applied = (review.get("Application Status", "").strip().casefold() == "applied"
+                       or bool(review.get("Applied At", "").strip()))
+            if row["has_checkable_source"] and review.get("AI Decision") == "Reject" and not applied:
+                try:
+                    reviewed, updated = (datetime.fromisoformat(review.get("AI Reviewed At", "")),
+                                         datetime.fromisoformat(row["updated_at"]))
+                    if reviewed.tzinfo is not None and updated.tzinfo is not None and reviewed >= updated:
+                        continue
+                except ValueError:
+                    pass  # A missing or invalid timestamp leaves the job unreviewed.
+            targets.append(row)
         return [LivenessTarget(row["job_id"], [
             SourceLink(s["source"], s["source_id"], s["url"])
             for s in self.conn.execute("SELECT source, source_id, url FROM job_sources WHERE job_id=?",
                                        (row["job_id"],))
             if s["source"] not in UNCHECKABLE_SOURCES
-        ]) for row in rows]
+        ]) for row in targets]
 
     def record_liveness(self, job_id: str, result: Liveness, now: str) -> None:
         """Status changes leave material content and its update timestamp untouched."""

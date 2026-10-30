@@ -1,11 +1,11 @@
 import sys
 from collections.abc import Callable, Iterator
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from shigoto import main, run_lock
+from shigoto import main, run_lock, serve
 from shigoto.config import City, Config, ReviewConfig, SheetConfig
 from shigoto.db import Store
 from shigoto.models import Job, job_from_json, job_json
@@ -429,3 +429,68 @@ def test_tick_reconciles_status_and_reapplies_controls_only_on_change(
     stats = pipeline.tick(config, review_due=review_due)
     expected = ["liveness:3", "open", "status"] + (["controls"] if closed else []) + (["review"] if review_due else [])
     assert calls == expected and stats["closed"] == closed
+
+
+@pytest.mark.parametrize("initial,following,expected", [
+    ({"ai_reviewed": 120, "ai_pending": 241}, {"ai_reviewed": 120, "ai_pending": 121}, [10, 20, 80]),
+    ({"ai_reviewed": 120, "ai_pending": 0}, {"ai_reviewed": 120, "ai_pending": 121}, [60, 70]),
+    ({"ai_reviewed": 0, "ai_pending": 241}, {"ai_reviewed": 120, "ai_pending": 121}, [60, 70]),
+    ({"ai_reviewed": 120, "ai_pending": 241, "ai_errors": 1},
+     {"ai_reviewed": 120, "ai_pending": 121}, [60, 70]),
+    ({"ai_reviewed": 120, "ai_pending": 241},
+     {"ai_reviewed": 1, "ai_pending": 240, "ai_errors": 1}, [10, 70]),
+    ({"ai_reviewed": 120, "ai_pending": 241}, {"ai_reviewed": 0, "ai_pending": 241}, [10, 70]),
+    ({"ai_reviewed": 120, "ai_pending": 241}, RuntimeError("Review unavailable"), [10, 70]),
+])
+def test_serve_drains_healthy_reviews_and_backs_off_after_errors_or_no_progress(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, initial: dict[str, int],
+        following: dict[str, int] | Exception, expected: list[int]) -> None:
+    config = config_for(tmp_path / "t.db")
+    config.review.enabled = True
+    start = datetime(2026, 10, 29, 12, tzinfo=timezone.utc)
+    now = start
+    last_finished: str | None = None
+    reviews: list[int] = []
+    ticks: list[int] = []
+
+    class Clock:
+        fromisoformat = datetime.fromisoformat
+
+        @staticmethod
+        def now() -> datetime:
+            return now
+
+    def advance(seconds: float) -> None:
+        nonlocal now
+        now += timedelta(seconds=seconds)
+        if now > start + timedelta(minutes=80):
+            raise KeyboardInterrupt
+
+    def run(config: Config, *, sync_sheet: bool) -> dict[str, int]:
+        nonlocal last_finished
+        assert sync_sheet
+        last_finished = now.isoformat()
+        return initial
+
+    def tick(config: Config, *, sync_sheet: bool, review_due: bool) -> dict[str, int]:
+        assert sync_sheet
+        minute = int((now - start).total_seconds() / 60)
+        ticks.append(minute)
+        if not review_due:
+            return {}
+        reviews.append(minute)
+        if len(reviews) == 1:
+            if isinstance(following, Exception):
+                raise following
+            return following
+        return {"ai_reviewed": 121, "ai_pending": 0}
+
+    monkeypatch.setattr("shigoto.datetime", Clock)
+    monkeypatch.setattr("shigoto.time.sleep", advance)
+    monkeypatch.setattr(Store, "last_finished_run", lambda self: last_finished)
+    monkeypatch.setattr("shigoto.run_once", run)
+    monkeypatch.setattr("shigoto.tick", tick)
+    with pytest.raises(KeyboardInterrupt):
+        serve(config, sync_sheet=True)
+    assert reviews == expected
+    assert ticks == list(range(10, 81, 10))

@@ -303,8 +303,9 @@ def test_indeed_decides_closure_with_uncheckable_link(monkeypatch: MonkeyPatch, 
 
 
 @pytest.mark.parametrize("sources", [["zip_recruiter"], ["glassdoor"], ["zip_recruiter", "glassdoor"]])
+@pytest.mark.parametrize("decision", ["", "Reject"])
 def test_uncheckable_only_closes_after_30_days_without_requests(monkeypatch: MonkeyPatch, tmp_path: Path,
-                                                             sources: list[str]) -> None:
+                                                             sources: list[str], decision: str) -> None:
     config = Config(search_terms=[], cities=[], title_keywords=[], sheet=SheetConfig(), liveness_max_per_run=0)
     store = Store(tmp_path / "t.db")
     for source in sources:
@@ -314,6 +315,10 @@ def test_uncheckable_only_closes_after_30_days_without_requests(monkeypatch: Mon
                        (sources[-1],))
     store.commit()
     [original] = store.visible_jobs()
+    store.backup_reviews(["AI Decision", "AI Reviewed At"], {original.job_id: {
+        "AI Decision": decision, "AI Reviewed At": "2026-10-03T12:00:00+00:00",
+    }}, "2026-10-04T12:00:00+00:00")
+    store.finish_sheet_rebuild()
 
     def unexpected_indeed(ids: list[str]) -> dict[str, Liveness]:
         pytest.fail("An uncheckable-only job should need no Indeed request")
@@ -338,6 +343,34 @@ def test_uncheckable_only_closes_after_30_days_without_requests(monkeypatch: Mon
     store.commit()
     assert check_liveness(store, config) == {"liveness_checked": 0, "closed": 0}
     assert store.visible_jobs()[0].status == ""
+    store.close()
+
+
+def test_rejects_spend_no_indeed_or_posting_requests(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    config = Config(search_terms=[], cities=[], title_keywords=[], sheet=SheetConfig(), liveness_max_per_run=1)
+    store = Store(tmp_path / "t.db")
+    add(store, "indeed", "reject-indeed", "QA A")
+    add(store, "jobbank", "reject-jobbank", "QA B")
+    add(store, "jobbank", "applied", "QA C")
+    reviews = {job.job_id: {"AI Decision": "Reject", "AI Reviewed At": "2026-10-02T12:00:00+00:00",
+                           "Application Status": "Applied" if job.title == "QA C" else "Not Applied"}
+               for job in store.visible_jobs()}
+    store.backup_reviews(list(next(iter(reviews.values()))), reviews, "2026-10-03T12:00:00+00:00")
+    store.finish_sheet_rebuild()
+    calls: list[str] = []
+
+    def unexpected_indeed(ids: list[str]) -> dict[str, Liveness]:
+        pytest.fail("AI rejects must not be included in the Indeed request")
+
+    def check(link: SourceLink) -> Liveness:
+        calls.append(link.source_id)
+        return "alive"
+
+    monkeypatch.setattr(indeed, "check_liveness", unexpected_indeed)
+    monkeypatch.setattr("shigoto.liveness.check_source", check)
+    monkeypatch.setattr("shigoto.liveness.now_iso", lambda: "2026-10-04T12:00:00+00:00")
+    assert check_liveness(store, config) == {"liveness_checked": 1, "closed": 0}
+    assert calls == ["applied"]
     store.close()
 
 

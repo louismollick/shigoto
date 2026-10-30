@@ -76,12 +76,20 @@ def main() -> None:
                 print(review(config, dry_run=args.dry_run, job_id=args.job, limit=args.limit).model_dump_json())
 
 
+def review_retry_delay(stats: dict[str, int]) -> timedelta:
+    """Drain a healthy review backlog next tick; wait an hour after errors or no progress."""
+    if stats.get("ai_pending", 0) > 0 and stats.get("ai_reviewed", 0) > 0 and not stats.get("ai_errors", 0):
+        return timedelta(0)
+    return REVIEW_RETRY
+
+
 def serve(config: Config, sync_sheet: bool) -> None:
     """Scheduler loop. The next run is due `interval_hours` after the last finished run
     in the DB, so container restarts don't trigger extra scrapes. While waiting, a tick every
-    `tick_minutes` checks closures and, at most hourly, retries reviews."""
+    `tick_minutes` checks closures and drains successful review batches. Reviews otherwise
+    retry hourly, including after usage limits, failures or an empty queue."""
     interval, step = timedelta(hours=config.interval_hours), timedelta(minutes=config.tick_minutes)
-    last_review = datetime.now().astimezone()
+    next_review = datetime.now().astimezone() + REVIEW_RETRY
     announced = None
     while True:
         store = Store(config.db_path)
@@ -96,20 +104,23 @@ def serve(config: Config, sync_sheet: bool) -> None:
             time.sleep(min(step, due - now).total_seconds())
             if datetime.now().astimezone() >= due:
                 continue
-            review_due = datetime.now().astimezone() - last_review >= REVIEW_RETRY
+            review_due = datetime.now().astimezone() >= next_review
             try:
                 with run_lock(config):
                     if review_due:
-                        last_review = datetime.now().astimezone()
+                        # Keep the hourly backoff even if tick raises before returning stats.
+                        next_review = datetime.now().astimezone() + REVIEW_RETRY
                     stats = tick(config, sync_sheet=sync_sheet, review_due=review_due)
+                    if review_due:
+                        next_review = datetime.now().astimezone() + review_retry_delay(stats)
                 log.info("tick: %s", stats)
             except Exception:
                 log.exception("tick failed")
             continue
         try:
             with run_lock(config):
-                run_once(config, sync_sheet=sync_sheet)
-            last_review = datetime.now().astimezone()
+                stats = run_once(config, sync_sheet=sync_sheet)
+            next_review = datetime.now().astimezone() + review_retry_delay(stats)
         except Exception:
             log.exception("run failed")
             time.sleep(600)  # don't hot-loop on a persistent failure
