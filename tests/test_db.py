@@ -94,7 +94,7 @@ def test_closure_checks_pause_for_excluded_jobs_and_resume_when_restored(tmp_pat
     store.close()
 
 
-@pytest.mark.parametrize("source", ["indeed", "linkedin", "workday", "zip_recruiter"])
+@pytest.mark.parametrize("source", ["indeed", "linkedin", "workday", "zip_recruiter", "glassdoor"])
 @pytest.mark.parametrize("decision,reviewed,application,eligible", [
     ("Reject", "2026-10-02T12:00:00+00:00", {}, False),
     ("Reject", "2026-10-01T07:00:00-05:00", {}, False),
@@ -120,7 +120,9 @@ def test_closure_checks_skip_current_rejects_unless_applied(
     data = {"AI Decision": decision, "AI Reviewed At": reviewed, **application}
     store.backup_reviews(list(data), {original.job_id: data}, "2026-10-04T12:00:00+00:00")
     store.finish_sheet_rebuild()
-    assert bool(store.liveness_candidates("2026-11-02T12:00:00+00:00")) is eligible
+    # Uncheckable-only jobs still close automatically without spending any requests.
+    assert bool(store.liveness_candidates("2026-11-02T12:00:00+00:00")) is (
+        eligible or source in {"zip_recruiter", "glassdoor"})
     assert store.visible_jobs() == [original]
     store.close()
 

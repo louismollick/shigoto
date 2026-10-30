@@ -303,8 +303,9 @@ def test_indeed_decides_closure_with_uncheckable_link(monkeypatch: MonkeyPatch, 
 
 
 @pytest.mark.parametrize("sources", [["zip_recruiter"], ["glassdoor"], ["zip_recruiter", "glassdoor"]])
+@pytest.mark.parametrize("decision", ["", "Reject"])
 def test_uncheckable_only_closes_after_30_days_without_requests(monkeypatch: MonkeyPatch, tmp_path: Path,
-                                                             sources: list[str]) -> None:
+                                                             sources: list[str], decision: str) -> None:
     config = Config(search_terms=[], cities=[], title_keywords=[], sheet=SheetConfig(), liveness_max_per_run=0)
     store = Store(tmp_path / "t.db")
     for source in sources:
@@ -314,6 +315,10 @@ def test_uncheckable_only_closes_after_30_days_without_requests(monkeypatch: Mon
                        (sources[-1],))
     store.commit()
     [original] = store.visible_jobs()
+    store.backup_reviews(["AI Decision", "AI Reviewed At"], {original.job_id: {
+        "AI Decision": decision, "AI Reviewed At": "2026-10-03T12:00:00+00:00",
+    }}, "2026-10-04T12:00:00+00:00")
+    store.finish_sheet_rebuild()
 
     def unexpected_indeed(ids: list[str]) -> dict[str, Liveness]:
         pytest.fail("An uncheckable-only job should need no Indeed request")

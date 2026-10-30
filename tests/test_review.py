@@ -14,6 +14,7 @@ from requests import Response
 
 from shigoto.config import ReviewConfig
 from shigoto.db import Store
+from shigoto.models import Job
 from shigoto.review import (
     Blocker, CodexUnavailable, Judgment, Pay, ReviewJob, ReviewReport, ReviewSheet, WITHHELD,
     finalize, input_hash, needs_review, policy_hash, read_jobs, review_rows, run_codex, timestamp,
@@ -124,6 +125,24 @@ def test_legacy_reviews_reset_once_per_policy_and_input(tmp_path: Path) -> None:
     sheet.rows[1][HEADERS.index("Salary")] = "$65,000 CAD/year"
     assert run(store, sheet, ReviewConfig(model="other-model"), judge=judge).reviewed == 1
     assert len(calls) == 3
+
+
+def test_published_rejection_immediately_stops_closure_requests(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(Job(source="linkedin", source_id="one", url="https://example.com/one",
+                     title="QA Technician", company="Saputo", location="Toronto", city="Toronto",
+                     description="Test food samples and maintain QC records."), "2026-10-08T10:00:00-05:00")
+    store.commit()
+    [stored] = store.visible_jobs()
+    sheet = Worksheet([record(stored.job_id)])
+    now = "2026-11-03T12:00:00+00:00"
+    assert len(store.liveness_candidates(now)) == 1
+    report = run(store, sheet, judge=lambda *args: judgment(stored.job_id, base_score=20))
+    assert report.reviewed == report.reject == 1 and report.pending == 0
+    # No Sheet backup runs between publication and closure selection.
+    assert store.reviews() == {}
+    assert store.liveness_candidates(now) == []
+    store.close()
 
 
 def test_stale_review_timestamp_requires_review_even_with_published_cache(tmp_path: Path) -> None:
