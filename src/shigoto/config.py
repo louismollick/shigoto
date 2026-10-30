@@ -117,7 +117,7 @@ class Config(BaseModel):
     liveness_max_per_run: int = Field(default=40, ge=0)
     interval_hours: float = 6.0
     # Between scrapes, every `tick_minutes`: closure checks with this request budget, Status cell
-    # updates, and an hourly review retry so the Codex queue resumes once usage limits reset.
+    # updates, and another review batch while making progress. Idle/failed reviews retry hourly.
     tick_minutes: float = Field(default=10, gt=0)
     liveness_max_per_tick: int = Field(default=10, ge=0)
     review: ReviewConfig = Field(default_factory=ReviewConfig)

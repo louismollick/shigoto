@@ -72,6 +72,113 @@ def test_description_queue_skips_hidden_and_closed_jobs_without_using_the_limit(
     assert len(store.missing_descriptions("zip_recruiter", 3)) == 3
 
 
+@pytest.mark.parametrize("source", ["linkedin", "workday", "zip_recruiter"])
+def test_closure_checks_pause_for_excluded_jobs_and_resume_when_restored(tmp_path: Path, source: str) -> None:
+    store = Store(tmp_path / "t.db")
+    first = "2026-10-01T12:00:00+00:00"
+    now = "2026-11-02T12:00:00+00:00"
+    store.upsert(job(source=source), first)
+    store.commit()
+    [original] = store.visible_jobs()
+    [candidate] = store.liveness_candidates(now)
+    config = config_for(tmp_path / "t.db")
+    config.exclude_title_keywords = ["Technician"]
+    assert store.reevaluate_exclusions(config, now) == 1
+    assert store.liveness_candidates(now) == []
+    config.exclude_title_keywords = []
+    assert store.reevaluate_exclusions(config, now) == 0
+    assert store.liveness_candidates(now) == [candidate]
+    assert store.visible_jobs() == [original]
+    row = store.conn.execute("SELECT liveness_checked_at, closed_at FROM jobs").fetchone()
+    assert row["liveness_checked_at"] is None and row["closed_at"] is None
+    store.close()
+
+
+@pytest.mark.parametrize("source", ["indeed", "linkedin", "workday", "zip_recruiter"])
+@pytest.mark.parametrize("decision,reviewed,application,eligible", [
+    ("Reject", "2026-10-02T12:00:00+00:00", {}, False),
+    ("Reject", "2026-10-01T07:00:00-05:00", {}, False),
+    ("Recommend", "2026-10-02T12:00:00+00:00", {}, True),
+    ("Maybe", "2026-10-02T12:00:00+00:00", {}, True),
+    ("", "", {}, True),
+    ("Reject", "", {}, True),
+    ("Reject", "invalid", {}, True),
+    ("Reject", "2026-10-02T12:00:00", {}, True),
+    ("Reject", "2026-09-30T12:00:00+00:00", {}, True),
+    ("Reject", "2026-10-02T12:00:00+00:00", {"Application Status": "Applied"}, True),
+    ("Reject", "2026-10-02T12:00:00+00:00", {"Applied At": "2026-10-03"}, True),
+    ("Reject", "2026-10-02T12:00:00+00:00", {"Application Status": "Not Applied"}, False),
+    ("Reject", "2026-10-02T12:00:00+00:00", {"Application Status": "Skip"}, False),
+])
+def test_closure_checks_skip_current_rejects_unless_applied(
+        tmp_path: Path, source: str, decision: str, reviewed: str, application: dict[str, str],
+        eligible: bool) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(source=source), "2026-10-01T12:00:00+00:00")
+    store.commit()
+    [original] = store.visible_jobs()
+    data = {"AI Decision": decision, "AI Reviewed At": reviewed, **application}
+    store.backup_reviews(list(data), {original.job_id: data}, "2026-10-04T12:00:00+00:00")
+    store.finish_sheet_rebuild()
+    assert bool(store.liveness_candidates("2026-11-02T12:00:00+00:00")) is eligible
+    assert store.visible_jobs() == [original]
+    store.close()
+
+
+def test_closure_checks_follow_published_reviews_and_newer_sheet_edits(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(source="linkedin"), "2026-10-01T12:00:00+00:00")
+    store.commit()
+    [original] = store.visible_jobs()
+    columns = ["AI Decision", "AI Reviewed At", "Application Status"]
+    now = "2026-11-02T12:00:00+00:00"
+
+    def publish(decision: str, reviewed: str, *, written: bool = True) -> None:
+        store.conn.execute(
+            "INSERT INTO ai_results (job_id, fingerprint, policy, result, fields, written_at) "
+            "VALUES (?, ?, 'policy', '{}', ?, ?)",
+            (original.job_id, reviewed, json.dumps({"decision": decision, "reviewed_at": reviewed}),
+             reviewed if written else None))
+        store.commit()
+
+    def backup(decision: str, at: str, application: str = "Not Applied") -> None:
+        store.backup_reviews(columns, {original.job_id: {
+            "AI Decision": decision, "AI Reviewed At": "2026-10-02T12:00:00+00:00",
+            "Application Status": application,
+        }}, at)
+        store.finish_sheet_rebuild()
+
+    backup("Recommend", "2026-10-03T12:00:00+00:00")
+    publish("Reject", "2026-10-04T12:00:00+00:00")
+    assert store.liveness_candidates(now) == []
+    # A prepared but unpublished promotion does not replace the current rejection.
+    publish("Maybe", "2026-10-05T07:00:00-05:00", written=False)
+    assert store.liveness_candidates(now) == []
+    store.conn.execute("UPDATE ai_results SET written_at=? WHERE written_at IS NULL",
+                       ("2026-10-05T07:00:00-05:00",))
+    store.commit()
+    assert len(store.liveness_candidates(now)) == 1
+    publish("Reject", "2026-10-05T13:00:00+00:00")
+    assert store.liveness_candidates(now) == []
+    # Later Sheet edits, including a cleared decision, take precedence over cached results.
+    backup("Maybe", "2026-10-06T12:00:00+00:00")
+    assert len(store.liveness_candidates(now)) == 1
+    backup("", "2026-10-07T12:00:00+00:00")
+    assert len(store.liveness_candidates(now)) == 1
+    # Editing the posting makes its old rejection stale, without discarding the review.
+    backup("Reject", "2026-10-08T12:00:00+00:00")
+    assert store.liveness_candidates(now) == []
+    assert store.upsert(job(source="linkedin", description="New duties"),
+                        "2026-10-09T12:00:00+00:00") == "changed"
+    store.commit()
+    assert len(store.liveness_candidates(now)) == 1
+    assert store.reviews()[original.job_id]["AI Decision"] == "Reject"
+    backup("Reject", "2026-10-10T12:00:00+00:00", application="Applied")
+    publish("Reject", "2026-10-11T12:00:00+00:00")
+    assert len(store.liveness_candidates(now)) == 1
+    store.close()
+
+
 @pytest.mark.parametrize("source", sorted(FULL_LISTING_SOURCES))
 def test_board_job_needs_confirmed_closure(tmp_path: Path, source: str) -> None:
     store = Store(tmp_path / "t.db")

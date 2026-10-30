@@ -341,6 +341,34 @@ def test_uncheckable_only_closes_after_30_days_without_requests(monkeypatch: Mon
     store.close()
 
 
+def test_rejects_spend_no_indeed_or_posting_requests(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    config = Config(search_terms=[], cities=[], title_keywords=[], sheet=SheetConfig(), liveness_max_per_run=1)
+    store = Store(tmp_path / "t.db")
+    add(store, "indeed", "reject-indeed", "QA A")
+    add(store, "jobbank", "reject-jobbank", "QA B")
+    add(store, "jobbank", "applied", "QA C")
+    reviews = {job.job_id: {"AI Decision": "Reject", "AI Reviewed At": "2026-10-02T12:00:00+00:00",
+                           "Application Status": "Applied" if job.title == "QA C" else "Not Applied"}
+               for job in store.visible_jobs()}
+    store.backup_reviews(list(next(iter(reviews.values()))), reviews, "2026-10-03T12:00:00+00:00")
+    store.finish_sheet_rebuild()
+    calls: list[str] = []
+
+    def unexpected_indeed(ids: list[str]) -> dict[str, Liveness]:
+        pytest.fail("AI rejects must not be included in the Indeed request")
+
+    def check(link: SourceLink) -> Liveness:
+        calls.append(link.source_id)
+        return "alive"
+
+    monkeypatch.setattr(indeed, "check_liveness", unexpected_indeed)
+    monkeypatch.setattr("shigoto.liveness.check_source", check)
+    monkeypatch.setattr("shigoto.liveness.now_iso", lambda: "2026-10-04T12:00:00+00:00")
+    assert check_liveness(store, config) == {"liveness_checked": 1, "closed": 0}
+    assert calls == ["applied"]
+    store.close()
+
+
 def test_least_recently_checked_go_first(tmp_path: Path) -> None:
     """A stale job that keeps answering alive must not stay ahead of never-checked jobs."""
     store = Store(tmp_path / "t.db")
