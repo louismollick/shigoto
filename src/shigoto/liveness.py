@@ -51,13 +51,11 @@ def check_source(link: SourceLink) -> Liveness:
         return "unknown"
 
 
-def employer_pages(target: LivenessTarget, answers: dict[str, indeed.IndeedAnswer]) -> list[SourceLink]:
+def employer_pages(target: LivenessTarget) -> list[SourceLink]:
     """Pages behind the job's apply URLs. A job on the employer's own listing already has its check."""
     if any(link.source in EMPLOYER_SOURCES for link in target.sources):
         return []
-    urls = [*target.apply_urls, *(answers[link.source_id].apply_url for link in target.sources
-                                  if link.source == "indeed" and link.source_id in answers)]
-    return list({page.url: page for url in urls if (page := employer_link(url))}.values())
+    return list({page.url: page for url in target.apply_urls if (page := employer_link(url))}.values())
 
 
 def check_liveness(store: Store, config: Config, budget: int | None = None) -> dict[str, int]:
@@ -67,8 +65,9 @@ def check_liveness(store: Store, config: Config, budget: int | None = None) -> d
     indeed_ids = [link.source_id for target in targets for link in target.sources if link.source == "indeed"]
     answers = indeed.check_liveness(indeed_ids) if indeed_ids else {}
     for source_id, found in answers.items():
-        if found.apply_url:
+        if found.apply_url or found.hosted:
             store.record_apply_url("indeed", source_id, found.apply_url)
+    targets = store.liveness_candidates(now)  # now with Indeed's current apply URLs
     budget = config.liveness_max_per_run if budget is None else budget
     linkedin_blocked = False
     checked = closed = 0
@@ -76,7 +75,8 @@ def check_liveness(store: Store, config: Config, budget: int | None = None) -> d
         # No links to check: all are uncheckable, so 30 days unseen is the only evidence.
         result: Liveness | None = "gone" if not target.sources and target.long_unseen else "unknown"
         by_employer = False
-        links = sorted([*target.sources, *employer_pages(target, answers)],
+        spent = False
+        links = sorted([*target.sources, *employer_pages(target)],
                        key=lambda link: (link.source not in EMPLOYER_SOURCES, link.source != "indeed"))
         for link in links:
             answer = answers.get(link.source_id) if link.source == "indeed" else None
@@ -87,6 +87,7 @@ def check_liveness(store: Store, config: Config, budget: int | None = None) -> d
                 break
             else:
                 budget -= 1
+                spent = True
                 value = check_source(link)
                 linkedin_blocked |= link.source == "linkedin" and value == "unknown"
                 if (value == "unknown" and link in target.sources and link.source in FULL_LISTING_SOURCES
@@ -100,9 +101,11 @@ def check_liveness(store: Store, config: Config, budget: int | None = None) -> d
             if employer or value != "gone" or (answer and answer.hosted):
                 by_employer = employer and value == "gone"
                 break
-        if result is None:
+        if result is None and not spent:
             continue  # retry next run without spending today's check
-        store.record_liveness(target.job_id, result, now, by_employer=by_employer)
+        # A job that spent requests rotates back even when unsettled, or it would keep the
+        # front of the queue and use up the budget of every run.
+        store.record_liveness(target.job_id, result or "unknown", now, by_employer=by_employer)
         checked += 1
         closed += result == "gone"
     store.commit()

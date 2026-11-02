@@ -51,7 +51,8 @@ def check_liveness(source_ids: list[str]) -> dict[str, IndeedAnswer]:
             continue
         for job in jobs:
             if isinstance(job, dict) and job.get("key") in by_key and isinstance(job.get("expired"), bool):
-                view_url = (job.get("recruit") or {}).get("viewJobUrl")
+                recruit = job.get("recruit")
+                view_url = recruit.get("viewJobUrl") if isinstance(recruit, dict) else ""
                 view_url = view_url if isinstance(view_url, str) else ""
                 results[by_key[job["key"]]] = IndeedAnswer("gone" if job["expired"] else "alive",
                                                            external_apply_url(view_url),

@@ -100,6 +100,9 @@ UpsertResult = Literal["new", "changed", "seen"]
 FULL_LISTING_SOURCES = frozenset({
     "workday", "smartrecruiters", "greenhouse", "lever", "ashby", "successfactors",
 })
+# Their direct checks can't confirm removal (robots rules, generic error pages), so absence from
+# the listing has to. Other full-listing sources answer directly and wait for a real answer.
+LISTING_ONLY_SOURCES = frozenset({"smartrecruiters", "ashby", "successfactors"})
 # Searches here are partial, so absence proves nothing, but each posting can be checked directly.
 DIRECT_CHECK_SOURCES = frozenset({"indeed", "linkedin", "jobbank"})
 UNCHECKABLE_SOURCES = frozenset({"zip_recruiter", "glassdoor"})
@@ -431,10 +434,10 @@ class Store:
         targets = []
         for row in rows:
             review = reviews.get(row["job_id"], {})
-            applied = (review.get("Application Status", "").strip().casefold() == "applied"
-                       or bool(review.get("Applied At", "").strip()))
-            skipped = review.get("Application Status", "").strip().casefold() == "skip"
-            if not row["has_checkable_source"] or applied or not (skipped or current_reject(review, row["updated_at"])):
+            status = review.get("Application Status", "").strip().casefold()
+            applied = status == "applied" or bool(review.get("Applied At", "").strip())
+            unwanted = status == "skip" or (current_reject(review, row["updated_at"]) and not applied)
+            if not row["has_checkable_source"] or not unwanted:
                 targets.append(row)
         result = []
         for row in targets:
@@ -471,16 +474,20 @@ class Store:
                               (now if result == "gone" else None, link.source, link.source_id))
 
     def record_apply_url(self, source: str, source_id: str, apply_url: str) -> None:
+        """Replace a link's apply URL; blank means applications no longer leave the aggregator."""
         self.conn.execute("UPDATE job_sources SET apply_url=? WHERE source=? AND source_id=?",
-                          (apply_url, source, source_id))
+                          (apply_url or None, source, source_id))
 
     def dropped_from_listing(self, link: SourceLink, now: str) -> bool:
         """The link's board answered within CLOSED_AFTER without it, so absence proves removal.
 
-        Requiring a recent sighting of another posting on the same board means a failed
-        scrape, or a board removed from the config, can't look like every posting closing.
+        Requiring a recent sighting of another posting on the same board means a board that
+        fails, or left the config, can't look like every posting closing. Should a partial
+        failure hide one posting for that long, its next sighting reopens the job.
         Source IDs are `<board>:<posting>`.
         """
+        if link.source not in LISTING_ONLY_SOURCES:
+            return False
         board = link.source_id.rpartition(":")[0] + ":"
         cutoff = (datetime.fromisoformat(now) - CLOSED_AFTER).isoformat()
         return self.conn.execute(

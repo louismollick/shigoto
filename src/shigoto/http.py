@@ -43,6 +43,10 @@ class RobotsDisallowed(Exception):
     """The origin's robots rules prohibit fetching this URL."""
 
 
+class OffHostRedirect(requests.RequestException):
+    """A posting check was redirected to another host."""
+
+
 class PoliteSession:
     def __init__(self, min_interval: float = 0.5, retries: int = 3, timeout: float = 30.0,
                  *, respect_robots: bool = False, robots_http_fallback: str | None = None) -> None:
@@ -56,8 +60,9 @@ class PoliteSession:
         self.robots_http_fallback = robots_http_fallback
         self._robots: dict[str, RobotFileParser] = {}
 
-    def request(self, method: str, url: str, *, respect_robots: bool | None = None,
+    def request(self, method: str, url: str, *, respect_robots: bool | None = None, same_host: bool = False,
                 **kwargs: Any) -> requests.Response:
+        """`same_host` refuses redirects to other hosts; it requires `respect_robots`, which follows them here."""
         if not (self.respect_robots if respect_robots is None else respect_robots):
             return self._request(method, url, **kwargs)
         # Check each redirect before following it, including external detail links.
@@ -67,7 +72,10 @@ class PoliteSession:
             response = self._request(method, url, allow_redirects=False, **kwargs)
             if not follow or not response.is_redirect:
                 return response
-            url = urljoin(response.url, response.headers["Location"])
+            target = urljoin(response.url, response.headers["Location"])
+            if same_host and urlparse(target).hostname != urlparse(url).hostname:
+                raise OffHostRedirect(target)
+            url = target
             kwargs.pop("params", None)
             if response.status_code == 303 or (response.status_code in (301, 302) and method == "POST"):
                 method = "GET"
@@ -147,7 +155,8 @@ def posting_liveness(session: PoliteSession, url: str, is_alive: Callable[[reque
     Other failures are inconclusive.
     """
     try:
-        response = session.request("GET", url, respect_robots=True)
+        # Posting URLs can come from scraped apply links, so a check never follows one off its host.
+        response = session.request("GET", url, respect_robots=True, same_host=True)
     except requests.HTTPError as exc:
         if exc.response is not None and (exc.response.status_code in (404, 410) or is_gone(exc.response)):
             return "gone"

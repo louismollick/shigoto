@@ -3,14 +3,15 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
+from urllib.robotparser import RobotFileParser
 
 import pytest
 import requests
 from pytest import MonkeyPatch
 
-from shigoto.config import Config, SheetConfig
+from shigoto.config import Config, SheetConfig, SlugBoard
 from shigoto.db import Store
-from shigoto.http import PoliteSession, RateLimited, RobotsDisallowed
+from shigoto.http import PoliteSession, RateLimited, RobotsDisallowed, posting_liveness
 from shigoto.liveness import check_liveness, check_source
 from shigoto.models import Job, Liveness, SourceLink
 from shigoto.sources import ats, indeed, jobbank, linkedin_detail, oracle, successfactors, workday
@@ -225,6 +226,14 @@ def test_indeed_batches_and_ignores_unexpected_jobs(monkeypatch: MonkeyPatch) ->
         "in-k1": IndeedAnswer("gone", "https://acme.example/job/1"), "in-k2": IndeedAnswer("alive", hosted=True),
     }
     assert ['"k1", "k2", "k3"' in queries[0], '"k4"' in queries[1]] == [True, True]
+
+
+def test_malformed_indeed_recruit_still_answers(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(indeed._session, "post_json", lambda url, body, **kwargs: {"data": {"jobData": {"results": [
+        {"job": {"key": "k1", "expired": False, "recruit": "bad"}},
+        {"job": {"key": "k2", "expired": False, "recruit": {"viewJobUrl": 7}}},
+    ]}}})
+    assert indeed.check_liveness(["in-k1", "in-k2"]) == {"in-k1": IndeedAnswer("alive"), "in-k2": IndeedAnswer("alive")}
 
 
 def add(store: Store, source: str, source_id: str, title: str) -> None:
@@ -487,6 +496,50 @@ def test_unrecognized_apply_host_is_never_requested(monkeypatch: MonkeyPatch, tm
     store.close()
 
 
+def test_replaced_apply_url_is_the_one_checked(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    add_apply(store, "indeed", "in-1", "https://jobs.lever.co/old/87a54373-296e-4a28-abb2-00a601414c38")
+    calls = freeze(monkeypatch, {"in-1": IndeedAnswer("alive", LEVER_URL)}, {"lever": "gone"})
+    check_liveness(store, config())
+    assert [link.source_id for link in calls] == ["acme:87a54373-296e-4a28-abb2-00a601414c38"]
+    store.close()
+
+
+def test_move_to_indeed_hosted_drops_the_old_employer_page(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    add_apply(store, "indeed", "in-1", LEVER_URL)
+    calls = freeze(monkeypatch, {"in-1": IndeedAnswer("alive", hosted=True)}, {"lever": "gone"})
+    assert check_liveness(store, config()) == {"liveness_checked": 1, "closed": 0}
+    assert calls == []
+    assert store.visible_jobs()[0].url == "https://example.com/in-1"
+    store.close()
+
+
+def test_blank_indeed_answer_keeps_the_known_employer_page(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    add_apply(store, "indeed", "in-1", LEVER_URL)
+    calls = freeze(monkeypatch, {"in-1": IndeedAnswer("alive")}, {"lever": "alive"})
+    check_liveness(store, config())
+    assert [link.source for link in calls] == ["lever"]
+    store.close()
+
+
+def test_job_that_spent_requests_rotates_back(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    """Unsettled jobs must not hold the front of the queue and use up every run's budget."""
+    cfg = Config(search_terms=[], cities=[], title_keywords=[], sheet=SheetConfig(), liveness_max_per_run=1)
+    store = Store(tmp_path / "t.db")
+    add_apply(store, "indeed", "in-1", LEVER_URL)
+    add(store, "jobbank", "jb-1", "QA")  # same job, and the budget is gone before it's asked
+    add(store, "jobbank", "jb-2", "Other QA")
+    store.conn.execute("UPDATE job_sources SET last_seen='2026-10-02T12:00:00+00:00' WHERE source_id='jb-2'")
+    store.commit()
+    calls = freeze(monkeypatch, {"in-1": IndeedAnswer("gone")}, {"jobbank": "gone"})
+    assert check_liveness(store, cfg) == {"liveness_checked": 1, "closed": 0}
+    assert check_liveness(store, cfg) == {"liveness_checked": 1, "closed": 1}
+    assert [link.source_id for link in calls][-1] == "jb-2"
+    store.close()
+
+
 def test_own_listing_wins_over_apply_url(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     store = Store(tmp_path / "t.db")
     add_apply(store, "indeed", "in-1", LEVER_URL)
@@ -529,6 +582,19 @@ def test_listing_absence_needs_a_board_that_still_answers(monkeypatch: MonkeyPat
     check_liveness(store, config())
     statuses = {job.title: job.status for job in store.visible_jobs()}
     assert statuses["QA"] == status
+    store.close()
+
+
+def test_listing_absence_is_not_used_when_a_direct_check_works(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    """Workday IDs don't carry the site, so another site's posting says nothing about this board."""
+    store = Store(tmp_path / "t.db")
+    add(store, "workday", "acme.wd3.myworkdayjobs.com:R1", "QA")
+    add(store, "workday", "acme.wd3.myworkdayjobs.com:R2", "Other QA")
+    store.conn.execute("UPDATE job_sources SET last_seen=? WHERE source_id LIKE '%:R2'", (NOW,))
+    store.commit()
+    freeze(monkeypatch)
+    check_liveness(store, config())
+    assert {job.title: job.status for job in store.visible_jobs()}["QA"] == ""
     store.close()
 
 
@@ -665,6 +731,35 @@ def test_oracle_requisition_lookup(monkeypatch: MonkeyPatch, data: object, expec
     monkeypatch.setattr(oracle._session, "request", request)
     assert oracle.check_liveness("https://ibanqy.fa.ocs.oraclecloud.com/x", "CX_4:119") == expected
     assert 'finder=ById;Id=%22119%22,siteNumber=CX_4' in urls[0] and urls[0].startswith("https://ibanqy.fa.ocs")
+
+
+def test_failed_smartrecruiters_detail_is_still_a_sighting(monkeypatch: MonkeyPatch) -> None:
+    def get_json(url: str, **kwargs: object) -> object:
+        if url.endswith("/postings"):
+            return {"totalFound": 1, "content": [{"id": "1", "name": "QA", "location": {"fullLocation": "Toronto"}}]}
+        raise requests.ConnectionError()
+
+    monkeypatch.setattr(ats._session, "get_json", get_json)
+    source = ats.SmartRecruitersSource([SlugBoard(slug="SGS", name="SGS")], ["qa"], ["QA"], lambda location: True)
+    [job] = list(source.fetch())
+    assert (job.source_id, job.description, job.location) == ("SGS:1", "", "Toronto")
+
+
+def test_posting_check_refuses_off_host_redirect(monkeypatch: MonkeyPatch) -> None:
+    session = PoliteSession(min_interval=0)
+    session._robots["https://jobs.lever.co"] = RobotFileParser()
+    session._robots["https://jobs.lever.co"].parse([])
+    requested: list[str] = []
+
+    def request(method: str, url: str, **kwargs: object) -> requests.Response:
+        requested.append(url)
+        result = response(url, "", 302)
+        result.headers["Location"] = "http://127.0.0.1:8080/admin"
+        return result
+
+    monkeypatch.setattr(session, "_request", request)
+    assert posting_liveness(session, "https://jobs.lever.co/acme/1", lambda r: True) == "unknown"
+    assert requested == ["https://jobs.lever.co/acme/1"]
 
 
 def test_smartrecruiters_inactive_posting_is_not_alive(monkeypatch: MonkeyPatch) -> None:

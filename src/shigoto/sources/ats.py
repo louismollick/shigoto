@@ -176,7 +176,12 @@ class SmartRecruitersSource:
         return results
 
     def _detail(self, board: SlugBoard, posting: dict[str, Any], location: str) -> Job:
-        detail = _session.get_json(f"{self.API}/{board.slug}/postings/{posting['id']}")
+        """A failed detail call still yields the posting: it's a sighting, and absence can close a job."""
+        try:
+            detail = _session.get_json(f"{self.API}/{board.slug}/postings/{posting['id']}")
+        except (requests.RequestException, RateLimited):
+            log.exception("smartrecruiters detail %s failed", posting["id"])
+            detail = {}
         compensation = detail.get("compensation") or {}
         sections = (detail.get("jobAd") or {}).get("sections") or {}
         description = "\n\n".join(

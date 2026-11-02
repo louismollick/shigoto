@@ -111,7 +111,7 @@ def test_closure_checks_pause_for_excluded_jobs_and_resume_when_restored(tmp_pat
     ("Reject", "2026-10-02T12:00:00+00:00", {"Application Status": "Skip"}, False),
     ("Recommend", "2026-10-02T12:00:00+00:00", {"Application Status": "Skip"}, False),
     ("", "", {"Application Status": " skip "}, False),
-    ("", "", {"Application Status": "Skip", "Applied At": "2026-10-03"}, True),
+    ("", "", {"Application Status": "Skip", "Applied At": "2026-10-03"}, False),
 ])
 def test_closure_checks_skip_current_rejects_unless_applied(
         tmp_path: Path, source: str, decision: str, reviewed: str, application: dict[str, str],
