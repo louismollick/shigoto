@@ -17,7 +17,8 @@ from shigoto.db import Store
 from shigoto.models import Job
 from shigoto.review import (
     Blocker, CodexUnavailable, Judgment, Pay, ReviewJob, ReviewReport, ReviewSheet, WITHHELD,
-    finalize, input_hash, needs_review, policy_hash, read_jobs, review_rows, run_codex, timestamp,
+    annual_maximum, finalize, needs_review, policy_hash, read_jobs, review_rows, rule_judgment, run_codex,
+    salary_pay, timestamp,
 )
 from shigoto.sheets import AI_COLUMNS
 
@@ -123,6 +124,7 @@ def test_legacy_reviews_reset_once_per_policy_and_input(tmp_path: Path) -> None:
     assert run(store, sheet, judge=judge).reviewed == 0
     assert run(store, sheet, ReviewConfig(model="other-model"), judge=judge).reviewed == 1
     sheet.rows[1][HEADERS.index("Salary")] = "$65,000 CAD/year"
+    sheet.rows[1][HEADERS.index("Updated At")] = "2099-01-01T00:00:00-05:00"
     assert run(store, sheet, ReviewConfig(model="other-model"), judge=judge).reviewed == 1
     assert len(calls) == 3
 
@@ -151,7 +153,7 @@ def test_stale_review_timestamp_requires_review_even_with_published_cache(tmp_pa
     run(store, sheet, judge=lambda *args: judgment())
     sheet.rows[1][HEADERS.index("AI Reviewed At")] = "2026-10-08T09:59:59-05:00"
     _, [job] = read_jobs(sheet.rows, ReviewReport())
-    assert needs_review(store, job, input_hash([job]), policy_hash(ReviewConfig()))
+    assert needs_review(store, job, policy_hash(ReviewConfig()))
 
 
 @pytest.mark.parametrize("bad", ["", "2026-10-08T15:00:00", "broken"])
@@ -192,10 +194,12 @@ def test_pay_floor(score: int, pay: int, expected_score: int, decision: str) -> 
 
 @pytest.mark.parametrize(("unit", "full_time", "currency", "amount", "expected"), [
     ("hourly", True, "CAD", 23.25, 54), ("hourly", False, "CAD", 23.25, 54),
-    ("unknown", True, "CAD", 23.25, 54), ("hourly", True, "USD", 23.25, 89),
-    ("annual", True, "USD", 45000, 89), ("unknown", True, "CAD", 45000, 89),
+    ("unknown", True, "CAD", 23.25, 54), ("unknown", True, "CAD", 45000, 89),
+    # ZipRecruiter labels Canadian pay USD, and Codex repeats it: Nature's Touch's $21.95/hr stayed Recommend.
+    ("hourly", True, "USD", 21.95, 54), ("annual", True, "USD", 45000, 54),
+    ("hourly", True, "EUR", 23.25, 89), ("annual", True, None, 45000, 89),
 ])
-def test_cad_hourly_pay_always_annualized(unit: str, full_time: bool, currency: str,
+def test_cad_hourly_pay_always_annualized(unit: str, full_time: bool, currency: str | None,
                                                      amount: float, expected: int) -> None:
     _, [job] = read_jobs(Worksheet([record()]).rows, ReviewReport())
     pay = Pay.model_validate({"minimum": amount, "maximum": amount, "currency": currency, "unit": unit, "full_time": full_time, "negotiable": False})
@@ -475,7 +479,7 @@ def test_strict_result_rejects_extra_fields_and_string_scores() -> None:
 
 @pytest.mark.parametrize(("score", "expected", "decision"), [(89, 74, "Maybe"), (60, 60, "Maybe"), (50, 50, "Reject")])
 def test_negotiable_pay_caps_at_maybe(score: int, expected: int, decision: str) -> None:
-    _, [job] = read_jobs(Worksheet([record()]).rows, ReviewReport())
+    _, [job] = read_jobs(Worksheet([record(Description="Pay depends on experience.")]).rows, ReviewReport())
     pay = Pay(minimum=45000, maximum=50000, currency="CAD", unit="annual", full_time=True, negotiable=True)
     fields = finalize(judgment(base_score=score, pay=pay), job, job)
     assert (fields.score, fields.decision) == (expected, decision)
@@ -528,3 +532,185 @@ def test_blank_description_is_never_reviewed(tmp_path: Path) -> None:
 
     report = run(Store(tmp_path / "t.db"), sheet, judge=judge)
     assert judged == ["described"] and report.pending == 0
+
+
+def add_row(sheet: Worksheet, values: dict[str, str]) -> None:
+    sheet.rows.append([values.get(name, "") for name in HEADERS])
+
+
+def test_duplicate_changing_or_closing_leaves_reviewed_jobs_alone(tmp_path: Path) -> None:
+    sheet = Worksheet([record("one"), record("two")])
+    store = Store(tmp_path / "t.db")
+    judged: list[str] = []
+
+    def judge(job: ReviewJob, group: list[ReviewJob], config: ReviewConfig) -> Judgment:
+        judged.append(job.job_id)
+        return judgment(job.job_id)
+
+    assert run(store, sheet, judge=judge).reviewed == 2
+    judged.clear()
+    # Dynacare's 27-posting group re-judged its unchanged members on each new posting and closure.
+    add_row(sheet, record("three"))
+    report = run(store, sheet, judge=judge)
+    assert judged == ["three"] and report.reviewed == 1 and report.pending == 0
+    judged.clear()
+    sheet.rows[3][HEADERS.index("Status")] = "Closed"
+    report = run(store, sheet, judge=judge)
+    assert not judged and report.reviewed == 0 and report.pending == 0
+
+
+def test_unpublished_result_stays_pending_and_resumes_from_cache(tmp_path: Path) -> None:
+    sheet = Worksheet([record()])
+    store = Store(tmp_path / "t.db")
+    sheet.errors = [api_error(), api_error()]
+    calls: list[str] = []
+
+    def judge(job: ReviewJob, group: list[ReviewJob], config: ReviewConfig) -> Judgment:
+        calls.append(job.job_id)
+        return judgment()
+
+    assert run(store, sheet, judge=judge).pending == 1
+    assert run(store, sheet, judge=judge).reviewed == 1
+    assert calls == ["one"]
+
+
+def test_result_published_before_the_latest_content_stays_pending(tmp_path: Path) -> None:
+    # The run wrote the Sheet and died before SQLite: the older published result can't stand in for it.
+    sheet = Worksheet([record()])
+    store = Store(tmp_path / "t.db")
+    run(store, sheet, judge=lambda *args: judgment())
+    sheet.rows[1][HEADERS.index("Updated At")] = "2099-01-01T00:00:00-05:00"
+    sheet.rows[1][HEADERS.index("AI Reviewed At")] = "2099-01-02T00:00:00-05:00"
+    _, [job] = read_jobs(sheet.rows, ReviewReport())
+    assert needs_review(store, job, policy_hash(ReviewConfig()))
+
+
+def test_skip_resumed_from_cache_still_counts_as_skipped(tmp_path: Path) -> None:
+    sheet = Worksheet([record(Salary="21 CAD hourly")])
+    store = Store(tmp_path / "t.db")
+    sheet.errors = [api_error(), api_error()]
+    assert run(store, sheet).skipped == 0
+    report = run(store, sheet)
+    assert (report.reviewed, report.skipped) == (1, 1)
+
+
+def test_codex_negotiable_flag_needs_wording_in_the_posting() -> None:
+    # ALS and Dynacare postings came back negotiable with nothing about pay being open.
+    pay = Pay(minimum=44678, maximum=44678, currency="CAD", unit="annual", full_time=True, negotiable=True)
+    _, [plain] = read_jobs(Worksheet([record()]).rows, ReviewReport())
+    fields = finalize(judgment(pay=pay), plain, plain)
+    assert (fields.score, fields.decision) == (54, "Reject") and "negotiable" not in fields.notes
+    _, [salary] = read_jobs(Worksheet([record(Salary="$21 to $22 hourly (to be negotiated)")]).rows, ReviewReport())
+    assert finalize(judgment(pay=pay), salary, salary).score == 74
+    assert finalize(judgment(pay=pay), plain, salary).score == 74
+    _, [closed] = read_jobs(Worksheet([record(Description="Salary is not negotiable.")]).rows, ReviewReport())
+    assert finalize(judgment(pay=pay), closed, closed).score == 54
+
+
+@pytest.mark.parametrize(("salary", "unit", "maximum"), [
+    ("21 - 21.95 CAD hourly", "hourly", 21.95), ("21 - 21.95 USD hourly", "hourly", 21.95),
+    ("$18.50 to $20.00 hourly", "hourly", 20), ("CA$22.00/hr - CA$24.00/hr", "hourly", 24),
+    ("$21/hr - $22/hr", "hourly", 22), ("45,000 - 50,000 CAD yearly", "annual", 50000),
+    ("$48,000 annually", "annual", 48000), ("CA$47,000.00/yr - CA$50,000.00/yr", "annual", 50000),
+])
+def test_salary_pay_reads_every_stored_format(salary: str, unit: str, maximum: float) -> None:
+    pay = salary_pay(salary)
+    assert pay is not None and (pay.unit, pay.maximum, pay.currency) == (unit, maximum, "CAD")
+
+
+@pytest.mark.parametrize("salary", ["", "50,000 CAD", "$40,000 to $50,000", "4,597.8 - 5,469.59 CAD monthly",
+                                    "1,349.34 - 1,697.54 CAD weekly", "300 CAD daily", "45,000 EUR yearly",
+                                    "$45,000 - $60k annually", "CA$60K/yr"])
+def test_salary_pay_leaves_unclear_periods_and_currencies_unknown(salary: str) -> None:
+    assert salary_pay(salary) is None
+
+
+def skip_for(**changes: str) -> Judgment | None:
+    _, [job] = read_jobs(Worksheet([record(**changes)]).rows, ReviewReport())
+    return rule_judgment(job)
+
+
+@pytest.mark.parametrize("salary", ["21 CAD hourly", "21 USD hourly", "25 CAD hourly", "25.12 CAD hourly", "52,249 CAD yearly"])
+def test_known_pay_under_the_near_floor_line_skips_codex(salary: str) -> None:
+    result = skip_for(Salary=salary)
+    assert result is not None and not result.blockers and result.base_score == 0
+
+
+@pytest.mark.parametrize("salary", [
+    "25.13 CAD hourly", "52,250 CAD yearly", "50,000 - 60,000 CAD yearly", "60,000 CAD yearly",
+    # Garbled or mislabeled figures, which finalize also treats as unknown.
+    "2 CAD hourly", "$1,362.39 to $1,611.47 annually", "$21 to $22 hourly (to be negotiated)",
+])
+def test_pay_codex_must_judge(salary: str) -> None:
+    assert skip_for(Salary=salary) is None
+
+
+@pytest.mark.parametrize(("description", "skipped"), [
+    ("Pay: From $20.00 per hour", False), ("Salary commensurate with experience.", False),
+    ("Starting at $21 an hour.", False), ("Wages are negotiable.", False),
+    ("Pay depending on your experience.", False), ("Wage based on qualifications.", False),
+    # Green Infrastructure's posting, a Maybe that the first version of this wording skipped.
+    ("The actual base rate will depend on several factors including experience.", False),
+    ("A valid licence is non-negotiable.", True), ("Depending on production needs.", True),
+    ("Salary is not negotiable.", True),
+])
+def test_open_pay_wording_keeps_low_pay_jobs_with_codex(description: str, skipped: bool) -> None:
+    assert (skip_for(Salary="21 CAD hourly", Description=description) is not None) == skipped
+
+
+@pytest.mark.parametrize(("description", "kind", "skipped"), [
+    ("Status: Casual", "", True), ("Employment Type:** Casual", "", True), ("Status:\nPart Time", "", True),
+    ("This is a casual position.", "", True), ("Position Type: Part Time", "", True),
+    ("Part-time or full-time position.", "", False), ("Status: Casual", "fulltime", False),
+    ("Status: Casual, moving to full time.", "", False), ("Casual dress code for this position.", "", False),
+    ("No on-call duties for this position.", "", False), ("This position is not a part-time role.", "", False),
+])
+def test_casual_wording_skips_codex(description: str, kind: str, skipped: bool) -> None:
+    result = skip_for(Description=description, Type=kind)
+    assert (result is not None) == skipped
+    if result:
+        assert [blocker.code for blocker in result.blockers] == ["casual_role"]
+
+
+def test_skipped_jobs_publish_a_reject_without_calling_codex(tmp_path: Path) -> None:
+    sheet = Worksheet([record("pay", Salary="21 CAD hourly"), record("casual", Title="Lab Assistant", Description="Status: Casual", Type=""),
+                       record("fit", Title="Lab Technician")])
+    store = Store(tmp_path / "t.db")
+    judged: list[str] = []
+
+    def judge(job: ReviewJob, group: list[ReviewJob], config: ReviewConfig) -> Judgment:
+        judged.append(job.job_id)
+        return judgment(job.job_id)
+
+    report = run(store, sheet, judge=judge)
+    assert judged == ["fit"]
+    assert (report.reviewed, report.skipped, report.reject, report.recommend, report.pending) == (3, 2, 2, 1, 0)
+    assert report.stats()["ai_skipped"] == 2
+    rows = {row[HEADERS.index("Job ID")]: row for row in sheet.rows[1:]}
+    assert rows["pay"][HEADERS.index("AI Decision")] == "Reject" and rows["pay"][HEADERS.index("AI Score")] == "0"
+    assert rows["pay"][HEADERS.index("AI Notes")] == "Skipped AI review. Known pay is CAD $43,680/year, below the $55,000 floor."
+    assert rows["casual"][HEADERS.index("AI Notes")] == 'Skipped AI review: the posting says "Status: Casual".'
+    judged.clear()
+    assert run(store, sheet, judge=judge).reviewed == 0 and not judged
+
+
+def test_skip_and_codex_coexist_in_one_duplicate_group(tmp_path: Path) -> None:
+    # The low-pay row is newest, so it is skipped first; Codex then judges its unpriced twin.
+    sheet = Worksheet([record("low", Salary="21 CAD hourly", **{"Updated At": "2026-10-09T10:00:00-05:00"}),
+                       record("blank", Salary="")])
+    store = Store(tmp_path / "t.db")
+    report = run(store, sheet, judge=lambda job, *rest: judgment(job.job_id, duplicate_job_ids=["low"]))
+    assert (report.reviewed, report.skipped, report.failures) == (2, 1, [])
+
+
+def test_dry_run_previews_a_skip_without_saving(tmp_path: Path) -> None:
+    sheet = Worksheet([record(Salary="21 CAD hourly")])
+    store = Store(tmp_path / "t.db")
+    report = run(store, sheet, dry_run=True)
+    assert report.previews["one"].decision == "Reject" and not sheet.writes
+    assert store.conn.execute("SELECT count(*) FROM ai_results").fetchone()[0] == 0
+
+
+def test_annual_maximum_rejects_implausible_hourly_figures() -> None:
+    pay = Pay(minimum=2, maximum=2, currency="CAD", unit="hourly", full_time=False, negotiable=False)
+    assert annual_maximum(pay) is None
