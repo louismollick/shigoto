@@ -2,6 +2,7 @@
 
 The sheet is read in full without changing its controls. Cached judgments are
 keyed by all supplied job inputs and the prompt/model version, not row numbers.
+Jobs Python can already reject skip Codex and publish through the same path.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from collections import Counter
@@ -41,6 +43,28 @@ PAY_FLOOR = 55000
 MIN_PLAUSIBLE_ANNUAL = 15000  # a smaller "annual" maximum is a mislabeled weekly or hourly figure
 NEAR_FLOOR = 0.95 * PAY_FLOOR  # close enough to negotiate up, treated like negotiable pay
 WITHHELD = "Notes withheld: write blocked."
+SKIPPED = "Skipped AI review"
+_SALARY_AMOUNT = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_SALARY_SHORTHAND = re.compile(r"\d\s*k\b", re.IGNORECASE)  # "$60k" would read as 60
+_SALARY_CURRENCY = re.compile(r"CAD|USD|\$")
+_SALARY_HOURLY = re.compile(r"\b(?:hourly|hour|hr)\b", re.IGNORECASE)
+_SALARY_ANNUAL = re.compile(r"\b(?:yearly|annually|annual|year|yr)\b", re.IGNORECASE)
+# Wording that leaves pay open. Codex's negotiable flag only counts next to one of these, and a job
+# with one always goes to Codex. A loose match only costs a review, so it errs towards matching.
+_NEGOTIABLE = re.compile(
+    r"(?<!non-)(?<!non )(?<!not )negotiable|negotiated|commensurate"
+    r"|(?:depend\w*\s+(?:on|upon)|based\s+(?:on|upon)|according\s+to)\b[^.\n]{0,80}\b(?:experience|qualifications?|skills)"
+    r"|starting\s+(?:at|from|wage|rate|salary|pay)|\bfrom\s+(?:CAD\s*|CA)?\$|\bDOE\b",
+    re.IGNORECASE,
+)
+# Labelled or affirmative statements only: "casual dress" and "not a part-time role" aren't casual roles.
+_CASUAL = re.compile(
+    r"(?:employment type|job type|position type|status|type of (?:position|employment))\s*[:\-]\s*\**\s*"
+    r"(?:casual|part[- ]time|temporary part|on[- ]call)"
+    r"|\bis\s+an?\s+(?:casual|on[- ]call|part[- ]time|relief)\s+(?:position|role|job)\b",
+    re.IGNORECASE,
+)
+_FULL_TIME = re.compile(r"\bfull[- ]?time\b", re.IGNORECASE)
 Category = Literal["Food QA", "Microbiology Lab", "QC Lab", "Biotech/Pharma", "Environmental Lab",
                    "Regulatory/Food Safety", "R&D/Product Development", "Other"]
 Decision = Literal["Recommend", "Maybe", "Reject"]
@@ -106,7 +130,8 @@ class Failure(StrictModel):
 
 
 class ReviewReport(BaseModel):
-    reviewed: int = 0
+    reviewed: int = 0  # every published result, including skipped
+    skipped: int = 0  # published without a Codex call
     recommend: int = 0
     maybe: int = 0
     reject: int = 0
@@ -116,8 +141,9 @@ class ReviewReport(BaseModel):
     previews: dict[str, AIFields] = Field(default_factory=dict)
 
     def stats(self) -> dict[str, int]:
-        return {"ai_reviewed": self.reviewed, "ai_recommend": self.recommend, "ai_maybe": self.maybe,
-                "ai_reject": self.reject, "ai_pending": self.pending, "ai_errors": len(self.failures)}
+        return {"ai_reviewed": self.reviewed, "ai_skipped": self.skipped, "ai_recommend": self.recommend,
+                "ai_maybe": self.maybe, "ai_reject": self.reject, "ai_pending": self.pending,
+                "ai_errors": len(self.failures)}
 
 
 @dataclass(frozen=True)
@@ -232,10 +258,12 @@ def input_hash(group: list[ReviewJob]) -> str:
                                     sort_keys=True).encode()).hexdigest()
 
 
-def needs_review(store: Store, job: ReviewJob, fingerprint: str, policy: str) -> bool:
+def needs_review(store: Store, job: ReviewJob, policy: str) -> bool:
     # Never judge a title alone. A blank row waits, unscored, until a detail fetch fills it.
     if not job.values["Description"].strip():
         return False
+    # Updated At moves when this job's own content changes. Its duplicates changing or closing
+    # doesn't requeue it: that re-judged whole groups of unchanged jobs for no change in outcome.
     try:
         if timestamp(job.values["AI Reviewed At"]) < job.updated_at:
             return True
@@ -243,9 +271,58 @@ def needs_review(store: Store, job: ReviewJob, fingerprint: str, policy: str) ->
         return True
     # The first Codex run re-reviews legacy scores once. Prompt/model changes reset
     # that version without a future cutoff that repeatedly selects the same rows.
-    row = store.conn.execute("SELECT written_at FROM ai_results WHERE job_id=? AND fingerprint=? AND policy=?",
-                             (job.job_id, fingerprint, policy)).fetchone()
-    return row is None or row["written_at"] is None
+    # A result written before this content doesn't count: a run can die between the Sheet and SQLite.
+    return store.conn.execute(
+        """SELECT 1 FROM ai_results WHERE job_id=? AND policy=? AND written_at IS NOT NULL
+           AND julianday(written_at) >= julianday(?) LIMIT 1""",
+        (job.job_id, policy, job.values["Updated At"])).fetchone() is None
+
+
+def annual_maximum(pay: Pay) -> float | None:
+    """Maximum pay per year, or None when it can't be trusted.
+
+    USD counts as CAD: only ZipRecruiter reports it, on Canadian postings, and Codex can repeat it.
+    Hourly pay is annualized even when full_time is false: blank job types make the model report
+    false, and part-time/casual roles are already hard blockers. An unknown unit under $200 can only
+    be an hourly rate.
+    """
+    if pay.maximum is None or pay.currency not in {"CAD", "USD"}:
+        return None
+    hourly = pay.unit == "hourly" or (pay.unit == "unknown" and pay.maximum < 200)
+    if pay.unit == "unknown" and not hourly:
+        return None
+    annual = pay.maximum * 2080 if hourly else pay.maximum
+    return annual if annual >= MIN_PLAUSIBLE_ANNUAL else None
+
+
+def salary_pay(salary: str) -> Pay | None:
+    """Explicit hourly or annual pay in the Salary field. Other periods stay with Codex."""
+    hourly, annual = bool(_SALARY_HOURLY.search(salary)), bool(_SALARY_ANNUAL.search(salary))
+    amounts = [float(amount.replace(",", "")) for amount in _SALARY_AMOUNT.findall(salary)]
+    if not amounts or hourly == annual or not _SALARY_CURRENCY.search(salary) or _SALARY_SHORTHAND.search(salary):
+        return None
+    return Pay(minimum=min(amounts), maximum=max(amounts), currency="CAD",
+               unit="hourly" if hourly else "annual", full_time=False, negotiable=False)
+
+
+def pay_is_open(job: ReviewJob) -> bool:
+    return bool(_NEGOTIABLE.search(f"{job.values['Salary']}\n{job.values['Description']}"))
+
+
+def rule_judgment(job: ReviewJob) -> Judgment | None:
+    """The Reject Python already knows without a Codex call, or None if Codex must judge the job."""
+    pay = salary_pay(job.values["Salary"])
+    annual = annual_maximum(pay) if pay else None
+    if pay and annual is not None and annual < NEAR_FLOOR and not pay_is_open(job):
+        return Judgment(canonical_job_id=job.job_id, duplicate_job_ids=[], base_score=0, blockers=[],
+                        category="Other", notes=f"{SKIPPED}.", pay=pay)
+    casual = _CASUAL.search(job.values["Description"])
+    if casual and not _FULL_TIME.search(f"{job.values['Type']}\n{job.values['Description']}"):
+        unknown = Pay(minimum=None, maximum=None, currency=None, unit="unknown", full_time=False, negotiable=False)
+        return Judgment(canonical_job_id=job.job_id, duplicate_job_ids=[], base_score=0,
+                        blockers=[Blocker(code="casual_role", evidence=casual.group(0))], category="Other",
+                        notes=f'{SKIPPED}: the posting says "{casual.group(0)}".', pay=unknown)
+    return None
 
 
 def run_codex(focus: ReviewJob, group: list[ReviewJob], config: ReviewConfig) -> Judgment:
@@ -296,20 +373,10 @@ def validate_references(result: Judgment, focus: ReviewJob, group: list[ReviewJo
 
 
 def finalize(result: Judgment, target: ReviewJob, canonical: ReviewJob) -> AIFields:
-    """Apply arithmetic and fixed decision rules, never keyword scoring."""
+    """Apply arithmetic and fixed decision rules."""
     pay = result.pay
-    annual_min, annual_max = pay.minimum, pay.maximum
-    # Hourly pay is annualized even when full_time is false: blank job types make
-    # the model report false, and part-time/casual roles are already hard blockers.
-    # An unknown unit under $200 can only be an hourly rate.
-    hourly = pay.unit == "hourly" or (pay.unit == "unknown" and annual_max is not None and annual_max < 200)
-    if pay.currency != "CAD" or (pay.unit == "unknown" and not hourly):
-        annual_min = annual_max = None
-    elif hourly and annual_min is not None and annual_max is not None:
-        annual_min *= 2080
-        annual_max *= 2080
-    if pay.unit == "annual" and annual_max is not None and annual_max < MIN_PLAUSIBLE_ANNUAL:
-        annual_min = annual_max = None
+    annual_max = annual_maximum(pay)
+    negotiable = pay.negotiable and (pay_is_open(target) or pay_is_open(canonical))
     score = result.base_score
     notes = result.notes.strip()
     details: list[str] = []
@@ -317,9 +384,9 @@ def finalize(result: Judgment, target: ReviewJob, canonical: ReviewJob) -> AIFie
         raise ValueError("Codex notes are blank")
     if annual_max is not None and annual_max < PAY_FLOOR:
         near = annual_max >= NEAR_FLOOR
-        score = min(score, 74 if pay.negotiable or near else 54)
+        score = min(score, 74 if negotiable or near else 54)
         details.append(f"known pay is CAD ${annual_max:,.0f}/year, below the $55,000 floor"
-                       + (" but negotiable" if pay.negotiable else " but within 5% of it" if near else ""))
+                       + (" but negotiable" if negotiable else " but within 5% of it" if near else ""))
     if result.blockers:
         score = min(score, 29)
     decision: Decision = "Recommend" if score >= 75 else "Maybe" if score >= 55 else "Reject"
@@ -399,7 +466,7 @@ def review_rows(store: Store, ws: gspread.Worksheet, config: ReviewConfig, *, dr
         groups.setdefault(group_key(job), []).append(job)
     policy = policy_hash(config)
     fingerprints = {job.job_id: input_hash(groups[group_key(job)]) for job in jobs}
-    eligible = [job for job in jobs if needs_review(store, job, fingerprints[job.job_id], policy)]
+    eligible = [job for job in jobs if needs_review(store, job, policy)]
     report.pending = len(eligible) + len(report.failures)
     selected = sorted((job for job in eligible if job_id is None or job.job_id == job_id),
                       key=lambda job: (job.updated_at, job.job_id), reverse=True)
@@ -417,7 +484,8 @@ def review_rows(store: Store, ws: gspread.Worksheet, config: ReviewConfig, *, dr
         try:
             cached = store.conn.execute("SELECT result FROM ai_results WHERE job_id=? AND fingerprint=? AND policy=?",
                                         (job.job_id, fingerprint, policy)).fetchone()
-            result = Judgment.model_validate_json(cached["result"]) if cached else judge(job, group, config)
+            result = (Judgment.model_validate_json(cached["result"]) if cached
+                      else rule_judgment(job) or judge(job, group, config))
             validate_references(result, job, group)
             # Never overwrite a member of an already confirmed group with a conflicting
             # canonical. Publish this job on its own instead, leaving other members' results
@@ -498,6 +566,7 @@ def review_rows(store: Store, ws: gspread.Worksheet, config: ReviewConfig, *, dr
                             job.job_id, fingerprints[job.job_id], policy))
         store.commit()
         decisions[fields.decision] += 1
+        report.skipped += fields.notes.startswith(SKIPPED)
     report.reviewed = sum(decisions.values())
     report.recommend, report.maybe, report.reject = (decisions[name] for name in ("Recommend", "Maybe", "Reject"))
     # Report the live backlog after writes, so changed/added rows remain visible.
@@ -508,11 +577,7 @@ def review_rows(store: Store, ws: gspread.Worksheet, config: ReviewConfig, *, dr
         report.pending = max(0, report.pending - report.reviewed)
         report.failures.append(Failure(job_id="", error=f"Backlog refresh failed: {error}"))
         return report
-    current_groups: dict[tuple[str, str, str], list[ReviewJob]] = {}
-    for job in current:
-        current_groups.setdefault(group_key(job), []).append(job)
-    report.pending = sum(needs_review(store, job, input_hash(current_groups[group_key(job)]), policy)
-                         for job in current) + len(remaining.failures)
+    report.pending = sum(needs_review(store, job, policy) for job in current) + len(remaining.failures)
     return report
 
 
