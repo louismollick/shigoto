@@ -176,7 +176,12 @@ class SmartRecruitersSource:
         return results
 
     def _detail(self, board: SlugBoard, posting: dict[str, Any], location: str) -> Job:
-        detail = _session.get_json(f"{self.API}/{board.slug}/postings/{posting['id']}")
+        """A failed detail call still yields the posting: it's a sighting, and absence can close a job."""
+        try:
+            detail = _session.get_json(f"{self.API}/{board.slug}/postings/{posting['id']}")
+        except (requests.RequestException, RateLimited):
+            log.exception("smartrecruiters detail %s failed", posting["id"])
+            detail = {}
         compensation = detail.get("compensation") or {}
         sections = (detail.get("jobAd") or {}).get("sections") or {}
         description = "\n\n".join(
@@ -220,7 +225,9 @@ def smartrecruiters_liveness(url: str, source_id: str) -> Liveness:
     if not sep or not posting_id:
         return "unknown"
     api = f"{SmartRecruitersSource.API}/{slug}/postings/{posting_id}"
-    return posting_liveness(_session, api, lambda r: posting_alive(r.json(), posting_id, "name"))
+    # The API keeps serving inactive postings, marked `active: false`.
+    return posting_liveness(_session, api, lambda r: (posting_alive(r.json(), posting_id, "name")
+                                                      and r.json().get("active") is not False))
 
 
 def posting_alive(data: object, posting_id: str, title_field: str) -> bool:
