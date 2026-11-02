@@ -15,7 +15,8 @@ class Job:
     `source` is the board family ("linkedin", "indeed", "jobbank", "workday", ...);
     `source_id` is unique within that source. `city` is one of the configured target
     cities: sources that search by city set it up front, others leave it blank and
-    normalize() derives it from `location`.
+    normalize() derives it from `location`. `apply_url` is the employer page an
+    aggregator links to, blank when it has none or we don't know it.
     """
 
     source: str
@@ -29,9 +30,19 @@ class Job:
     salary: str = ""
     job_type: str = ""
     city: str = ""
+    apply_url: str = ""
 
 
 Liveness = Literal["gone", "alive", "unknown"]
+
+
+@dataclass(frozen=True)
+class SourceLink:
+    """One posting to check: a stored source link, or the employer page behind one."""
+
+    source: str
+    source_id: str
+    url: str
 
 
 def job_json(job: Job) -> str:
@@ -49,4 +60,5 @@ def job_from_json(raw: str) -> Job:
         company=data["company"], location=data["location"], description=data["description"],
         posted_date=date.fromisoformat(posted) if posted else None,
         salary=data["salary"], job_type=data["job_type"], city=data["city"],
+        apply_url=data.get("apply_url", ""),  # absent from snapshots saved before apply URLs
     )

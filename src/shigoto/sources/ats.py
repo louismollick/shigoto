@@ -220,7 +220,9 @@ def smartrecruiters_liveness(url: str, source_id: str) -> Liveness:
     if not sep or not posting_id:
         return "unknown"
     api = f"{SmartRecruitersSource.API}/{slug}/postings/{posting_id}"
-    return posting_liveness(_session, api, lambda r: posting_alive(r.json(), posting_id, "name"))
+    # The API keeps serving inactive postings, marked `active: false`.
+    return posting_liveness(_session, api, lambda r: (posting_alive(r.json(), posting_id, "name")
+                                                      and r.json().get("active") is not False))
 
 
 def posting_alive(data: object, posting_id: str, title_field: str) -> bool:

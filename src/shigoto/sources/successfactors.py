@@ -22,6 +22,8 @@ from shigoto.text import clean, html_to_text, parse_date
 log = logging.getLogger(__name__)
 _session = PoliteSession(min_interval=1.0, respect_robots=True)
 MAX_PAGES = 40
+# Shown with a 200 for a removed posting. English only: other locales stay inconclusive.
+_UNAVAILABLE = re.compile(r"view this job because it\S{1,6}s not available at this time")
 
 
 def board_base(url: str) -> str:
@@ -142,4 +144,5 @@ class SuccessFactorsSource:
 
 def check_liveness(url: str, source_id: str) -> Liveness:
     # RMK's generic error-page redirects are inconclusive and robots-disallowed.
-    return posting_liveness(_session, url, lambda r: bool(parse_detail(r.text)[0]))
+    return posting_liveness(_session, url, lambda r: bool(parse_detail(r.text)[0]),
+                            lambda r: bool(_UNAVAILABLE.search(r.text)))

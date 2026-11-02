@@ -183,6 +183,7 @@ def row_to_job(row: Mapping[str, object], city: str) -> Job | None:
         salary=format_salary(row),
         job_type=clean(row.get("job_type")),
         city=city,
+        apply_url=clean(row.get("job_url_direct")),
     )
 
 

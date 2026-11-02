@@ -74,7 +74,8 @@ def test_fresh_sheet_gets_dropdowns_dates_and_default_filter() -> None:
         "range": {"sheetId": SHEET_ID, "startRowIndex": 0, "endRowIndex": 51,
                   "startColumnIndex": 0, "endColumnIndex": 24},
         "filterSpecs": [{"columnIndex": status, "filterCriteria": {"hiddenValues": ["Closed"]}},
-                        {"columnIndex": stage + 3, "filterCriteria": {"hiddenValues": ["Reject"]}}],
+                        {"columnIndex": stage + 3, "filterCriteria": {"hiddenValues": ["Reject"]}},
+                        {"columnIndex": stage + 5, "filterCriteria": {"hiddenValues": ["Skip"]}}],
         "sortSpecs": [{"dimensionIndex": stage + 1, "sortOrder": "DESCENDING"}],
     }
     # Data rows across the full A:X width are physically sorted, so reviews move with their row.

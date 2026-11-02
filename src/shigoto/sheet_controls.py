@@ -12,7 +12,7 @@ STATUS_CHOICES = ["Not Applied", "Applied", "Skip"]
 STAGE_CHOICES = ["Applied", "Screening", "Interview", "Offer", "Rejected", "Withdrawn"]
 DATE_FORMATS = {"Applied At": ("DATE_TIME", "yyyy-mm-dd hh:mm"), "Follow-up Date": ("DATE", "yyyy-mm-dd")}
 # Default filter for a sheet without one: hide these exact values; blanks stay visible.
-HIDDEN_VALUES = {"Status": ["Closed"], "AI Decision": ["Reject"]}
+HIDDEN_VALUES = {"Status": ["Closed"], "AI Decision": ["Reject"], "Application Status": ["Skip"]}
 SORT_COLUMN = "AI Score"
 
 
@@ -32,7 +32,7 @@ def configure_tracker(ws: gspread.Worksheet) -> None:
         return {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": rows,
                 "startColumnIndex": i, "endColumnIndex": i + 1}
 
-    # filteredRowsIncluded: rows hidden by the filter (Closed, Reject) still get controls.
+    # filteredRowsIncluded: rows hidden by the filter (Closed, Reject, Skip) still get controls.
     requests: list[dict[str, object]] = []
     if rows > 1:
         for name, choices in (("Application Status", STATUS_CHOICES), ("Application Stage", STAGE_CHOICES)):

@@ -229,8 +229,8 @@ def read_jobs(rows: list[list[str]], report: ReviewReport) -> tuple[dict[str, in
         if job_id in ids:
             raise RuntimeError(f"Duplicate sheet Job ID: {job_id}")
         ids.add(job_id)
-        if values["Status"] == "Closed":
-            continue
+        if values["Status"] == "Closed" or values.get("Application Status", "").strip().casefold() == "skip":
+            continue  # Skip doubles as the reviewer's manual close.
         try:
             updated = timestamp(values["Updated At"])
         except ValueError as error:

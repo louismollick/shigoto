@@ -142,7 +142,7 @@ def _retry_after(resp: requests.Response) -> float | None:
 
 def posting_liveness(session: PoliteSession, url: str, is_alive: Callable[[requests.Response], bool],
                      is_gone: Callable[[requests.Response], bool] = lambda response: False) -> Liveness:
-    """A posting's 404/410, or another error response `is_gone` recognizes, proves removal.
+    """A posting's 404/410, or any other response `is_gone` recognizes, proves removal.
 
     Other failures are inconclusive.
     """
@@ -157,6 +157,8 @@ def posting_liveness(session: PoliteSession, url: str, is_alive: Callable[[reque
     if response.status_code != 200:
         return "unknown"
     try:
-        return "alive" if is_alive(response) else "unknown"
+        if is_alive(response):
+            return "alive"
+        return "gone" if is_gone(response) else "unknown"
     except (ValueError, TypeError, KeyError):
         return "unknown"

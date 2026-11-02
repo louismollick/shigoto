@@ -15,8 +15,16 @@ A job hidden because it no longer passes the city or title filters; kept for its
 _Avoid_: Filtered, deleted
 
 **Closed**:
-A job every source has confirmed is no longer accepting applications.
+A job no longer accepting applications, as confirmed by its employer or, when the employer can't answer, by every source we can check.
 _Avoid_: Expired, removed
+
+**Employer Page**:
+The employer's own posting, on its listing or behind an aggregator's apply URL. It decides whether a job is open and is the link shown.
+_Avoid_: Direct link, ATS link
+
+**Skip**:
+The reviewer's call not to pursue a job, including when its posting is dead but the app can't tell. Skipped jobs get no AI review or closure checks.
+_Avoid_: Manually closed, hidden
 
 ### Candidate
 
