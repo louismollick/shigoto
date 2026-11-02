@@ -646,7 +646,8 @@ def test_pay_codex_must_judge(salary: str) -> None:
 
 
 @pytest.mark.parametrize(("description", "skipped"), [
-    ("Pay: From $20.00 per hour", False), ("Salary commensurate with experience.", False),
+    ("Pay: From $20.00 per hour", False), ("From CAD $21/hour", False), ("From CA$21/hour", False),
+    ("Salary commensurate with experience.", False),
     ("Starting at $21 an hour.", False), ("Wages are negotiable.", False),
     ("Pay depending on your experience.", False), ("Wage based on qualifications.", False),
     # Green Infrastructure's posting, a Maybe that the first version of this wording skipped.

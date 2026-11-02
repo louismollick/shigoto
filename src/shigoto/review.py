@@ -54,7 +54,7 @@ _SALARY_ANNUAL = re.compile(r"\b(?:yearly|annually|annual|year|yr)\b", re.IGNORE
 _NEGOTIABLE = re.compile(
     r"(?<!non-)(?<!non )(?<!not )negotiable|negotiated|commensurate"
     r"|(?:depend\w*\s+(?:on|upon)|based\s+(?:on|upon)|according\s+to)\b[^.\n]{0,80}\b(?:experience|qualifications?|skills)"
-    r"|starting\s+(?:at|from|wage|rate|salary|pay)|\bfrom\s+(?:CA)?\$|\bDOE\b",
+    r"|starting\s+(?:at|from|wage|rate|salary|pay)|\bfrom\s+(?:CAD\s*|CA)?\$|\bDOE\b",
     re.IGNORECASE,
 )
 # Labelled or affirmative statements only: "casual dress" and "not a part-time role" aren't casual roles.
