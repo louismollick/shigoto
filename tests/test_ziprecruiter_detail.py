@@ -169,3 +169,54 @@ def test_valid_jsonld_survives_a_truncated_embedded_text_row(monkeypatch: Monkey
     page = HTML + f'<script>self.__next_f.push([1,{json.dumps(stream)}])</script>'
     sessions(monkeypatch, [response(text=page)])
     assert z.fetch_description(URL, delay=0) == ('Analyze samples.', '')
+
+
+def compact(data: object) -> str:
+    return json.dumps(data, separators=(',', ':'))  # as Next.js serializes it
+
+
+def flight_status(status: dict[str, object]) -> Mock:
+    return response(text='0:' + compact({'jobDetails': {'status': status}}), flight=True)
+
+
+@pytest.mark.parametrize('status,expected', [
+    ({'postedAtUtc': '2026-10-21T01:17:08Z', 'deactivatedAtUtc': '2026-11-09T05:15:16Z'}, 'gone'),
+    ({'isActive': True, 'postedAtUtc': '2026-09-08T23:00:00Z'}, 'alive'),
+    ({'isActive': True, 'deactivatedAtUtc': '2026-11-09T05:15:16Z'}, 'unknown'),  # contradictory
+])
+def test_liveness_reads_posting_status(monkeypatch: MonkeyPatch, status: dict[str, object], expected: str) -> None:
+    # The first HTML page has a description but no jobDetails: like descriptions, status retries with Flight.
+    sessions(monkeypatch, [response(), flight_status(status)])
+    monkeypatch.setattr('shigoto.sources.ziprecruiter_detail.time.sleep', lambda seconds: None)
+    assert z.check_liveness(URL, 'zr-1') == expected
+
+
+def test_html_status_is_read_without_flight(monkeypatch: MonkeyPatch) -> None:
+    rows = '0:' + compact({'jobDetails': {'status': {'deactivatedAtUtc': '2026-11-09T05:15:16Z'}}})
+    clients = sessions(monkeypatch, [response(text=f'<script>self.__next_f.push([1,{json.dumps(rows)}])</script>')])
+    assert z.check_liveness(URL, 'zr-1') == 'gone'
+    assert len(clients) == 1
+
+
+@pytest.mark.parametrize('status,expected', [(404, 'gone'), (410, 'gone'), (403, 'unknown'), (500, 'unknown')])
+def test_liveness_http_status(monkeypatch: MonkeyPatch, status: int, expected: str) -> None:
+    sessions(monkeypatch, [response(status) for _ in range(z.MAX_REQUESTS)])
+    monkeypatch.setattr('shigoto.sources.ziprecruiter_detail.time.sleep', lambda seconds: None)
+    assert z.check_liveness(URL, 'zr-1') == expected
+
+
+@pytest.mark.parametrize('status', [{}, {'isActive': False}, 'active'])
+def test_unrecognized_status_is_unknown_after_retries(monkeypatch: MonkeyPatch, status: object) -> None:
+    replies = [response(text='0:' + compact({'jobDetails': {'status': status}}), flight=True)
+               for _ in range(z.MAX_REQUESTS)]
+    clients = sessions(monkeypatch, replies)
+    monkeypatch.setattr('shigoto.sources.ziprecruiter_detail.time.sleep', lambda seconds: None)
+    assert z.check_liveness(URL, 'zr-1') == 'unknown'
+    assert len(clients) == z.MAX_REQUESTS
+
+
+def test_unrecognized_200_still_retries_descriptions_with_flight(monkeypatch: MonkeyPatch) -> None:
+    stream = '0:' + compact({'jobDetails': {'htmlFullDescription': '<p>Plate samples.</p>'}})
+    sessions(monkeypatch, [response(text='<html>Just a moment</html>'), response(text=stream, flight=True)])
+    monkeypatch.setattr('shigoto.sources.ziprecruiter_detail.time.sleep', lambda seconds: None)
+    assert z.fetch_description(URL) == ('Plate samples.', '')

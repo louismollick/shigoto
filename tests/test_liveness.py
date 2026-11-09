@@ -766,3 +766,127 @@ def test_smartrecruiters_inactive_posting_is_not_alive(monkeypatch: MonkeyPatch)
     page = json.dumps({"id": "1", "name": "QA", "active": False})
     monkeypatch.setattr(ats._session, "request", lambda method, url, **kwargs: response(url, page, 200))
     assert ats.smartrecruiters_liveness("https://example.com/1", "board:1") == "unknown"
+
+
+def add_zip(store: Store, source_id: str, title: str = "QA", jid: str = "1",
+            last_seen: str = "2026-10-01T12:00:00+00:00") -> str:
+    store.upsert(Job(source="zip_recruiter", source_id=source_id, title=title, company="Acme",
+                     url=f"https://www.ziprecruiter.com/c/Acme/Job/QA/-in-Toronto,ON?jid={jid}",
+                     location="Toronto", city="Toronto"), last_seen)
+    store.commit()
+    return str(store.conn.execute("SELECT job_id FROM job_sources WHERE source_id=?", (source_id,)).fetchone()[0])
+
+
+def zip_mode(monkeypatch: MonkeyPatch, checks: dict[str, Liveness] | None = None,
+             proxy: str | None = "http://proxy:1") -> list[SourceLink]:
+    monkeypatch.setattr("shigoto.liveness.proxy_url", lambda: proxy)
+    monkeypatch.setattr("shigoto.liveness.time.sleep", lambda seconds: None)
+    return freeze(monkeypatch, checks=checks)
+
+
+def set_review(store: Store, job_id: str, **values: str) -> None:
+    store.backup_reviews(list(values), {job_id: values}, "2026-10-03T12:00:00+00:00")
+    store.finish_sheet_rebuild()
+
+
+@pytest.mark.parametrize("answer,status", [("gone", "Closed"), ("alive", ""), ("unknown", "")])
+def test_zip_recruiter_only_job_is_checked_with_a_proxy(monkeypatch: MonkeyPatch, tmp_path: Path,
+                                                        answer: Liveness, status: str) -> None:
+    store = Store(tmp_path / "t.db")
+    add_zip(store, "zr-1")
+    calls = zip_mode(monkeypatch, {"zip_recruiter": answer})
+    assert check_liveness(store, config()) == {"liveness_checked": 1, "closed": int(answer == "gone")}
+    assert [link.source for link in calls] == ["zip_recruiter"]
+    [job] = store.visible_jobs()
+    assert job.status == status
+    # A ZipRecruiter closure isn't the employer's, so a later sighting reopens it for a recheck.
+    assert store.conn.execute("SELECT closed_by_employer FROM jobs").fetchone()[0] == 0
+    store.close()
+
+
+def test_zip_recruiter_is_not_checked_without_a_proxy(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    add_zip(store, "zr-1")
+    calls = zip_mode(monkeypatch, {"zip_recruiter": "gone"}, proxy=None)
+    assert check_liveness(store, config()) == {"liveness_checked": 0, "closed": 0}
+    assert calls == []
+    store.close()
+
+
+def test_recent_zip_recruiter_sighting_waits(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    add_zip(store, "zr-1", last_seen="2026-10-03T12:00:00+00:00")  # a day before NOW
+    calls = zip_mode(monkeypatch, {"zip_recruiter": "gone"})
+    assert check_liveness(store, config()) == {"liveness_checked": 0, "closed": 0}
+    assert calls == []
+    store.close()
+
+
+@pytest.mark.parametrize("review", [{"Application Status": "Skip"},
+                                    {"AI Decision": "Reject", "AI Reviewed At": "2026-10-03T12:00:00+00:00"}])
+def test_unwanted_zip_recruiter_job_spends_nothing_but_still_closes_at_30_days(
+        monkeypatch: MonkeyPatch, tmp_path: Path, review: dict[str, str]) -> None:
+    store = Store(tmp_path / "t.db")
+    job_id = add_zip(store, "zr-1")
+    set_review(store, job_id, **review)
+    calls = zip_mode(monkeypatch, {"zip_recruiter": "gone"})
+    assert check_liveness(store, config()) == {"liveness_checked": 0, "closed": 0}
+    monkeypatch.setattr("shigoto.liveness.now_iso", lambda: "2026-10-31T12:00:00+00:00")
+    assert check_liveness(store, config()) == {"liveness_checked": 1, "closed": 1}
+    assert calls == []
+    store.close()
+
+
+def test_30_day_rule_beats_zip_recruiter_backoff_and_budget(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    add_zip(store, "zr-1")
+    # ZipRecruiter kept saying active the day before, but the posting hasn't been listed in 30 days.
+    store.conn.execute("UPDATE jobs SET liveness_checked_at='2026-10-30T12:00:00+00:00', liveness_alive_streak=3")
+    store.commit()
+    calls = zip_mode(monkeypatch, {"zip_recruiter": "alive"})
+    monkeypatch.setattr("shigoto.liveness.now_iso", lambda: "2026-10-31T12:00:00+00:00")
+    assert check_liveness(store, config(), budget=0) == {"liveness_checked": 1, "closed": 1}
+    assert calls == []
+    store.close()
+
+
+def test_jobs_sharing_a_zip_recruiter_posting_cost_one_check(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    first, second = add_zip(store, "zr-a", title="QA"), add_zip(store, "zr-b", title="QA Technician")
+    assert first != second
+    calls = zip_mode(monkeypatch, {"zip_recruiter": "gone"})
+    assert check_liveness(store, config(), budget=1) == {"liveness_checked": 2, "closed": 2}
+    assert len(calls) == 1
+    store.close()
+
+
+def test_zip_recruiter_checks_stop_after_repeated_unknowns(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    for n in range(5):
+        add_zip(store, f"zr-{n}", title=f"QA {n}", jid=str(n))
+    waits: list[float] = []
+    calls = zip_mode(monkeypatch)
+    monkeypatch.setattr("shigoto.liveness.time.sleep", waits.append)
+    assert check_liveness(store, config()) == {"liveness_checked": 3, "closed": 0}
+    assert len(calls) == 3
+    assert waits == [2.0, 2.0]  # paced between postings, not before the first
+    store.close()
+
+
+@pytest.mark.parametrize("other", ["indeed", "linkedin", "lever-apply"])
+def test_zip_recruiter_never_votes_on_a_job_with_other_evidence(monkeypatch: MonkeyPatch, tmp_path: Path,
+                                                                other: str) -> None:
+    store = Store(tmp_path / "t.db")
+    add_zip(store, "zr-1")
+    if other == "lever-apply":
+        store.conn.execute("UPDATE job_sources SET apply_url=?", (LEVER_URL,))
+        store.commit()
+    else:
+        store.upsert(Job(source=other, source_id=f"{other}-1", url="https://example.com/1", title="QA",
+                         company="Acme", location="Toronto", city="Toronto"), "2026-10-01T12:00:00+00:00")
+        store.commit()
+    calls = zip_mode(monkeypatch, {"zip_recruiter": "alive", "indeed": "gone", "linkedin": "gone", "lever": "gone"})
+    monkeypatch.setattr(indeed, "check_liveness", lambda ids: {i: IndeedAnswer("gone") for i in ids})
+    assert check_liveness(store, config()) == {"liveness_checked": 1, "closed": 1}
+    assert "zip_recruiter" not in [link.source for link in calls]
+    store.close()

@@ -1,4 +1,7 @@
-"""Fetch ZipRecruiter descriptions with paced, fresh-session retries and Flight fallback."""
+"""Fetch ZipRecruiter postings with paced, fresh-session retries and Flight fallback.
+
+The same fetch reads a posting's description during enrichment and its status during closure checks.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +9,8 @@ import json
 import logging
 import re
 import time
+from collections.abc import Callable
+from typing import TypeVar
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import requests
@@ -15,6 +20,7 @@ from jobspy.util import TLSRotating
 from jobspy.ziprecruiter.util import page_values
 
 from shigoto.http import proxy_url
+from shigoto.models import Liveness
 from shigoto.text import html_to_text
 
 log = logging.getLogger(__name__)
@@ -22,6 +28,7 @@ log = logging.getLogger(__name__)
 MAX_REQUESTS = 4
 _FLIGHT_REDIRECT = re.compile(r'NEXT_REDIRECT;(?:replace|push);([^;"\n]+);(?:303|307|308);')
 _TEXT_ROW = re.compile(rb"[0-9a-f]*:(?:T([0-9a-f]+),)?")
+T = TypeVar("T")
 
 
 class _UnsafeURL(ValueError):
@@ -52,9 +59,34 @@ def _flight_url(url: str) -> str:
     return urlunparse(parsed._replace(query=urlencode([*query, ("_rsc", "")])))
 
 
+def _job_details(page: str, flight: bool) -> dict[str, object]:
+    """The posting's Next.js `jobDetails`, from HTML's self.__next_f.push scripts or a Flight response.
+
+    Reuses JobSpy's decoder, including its references to length-prefixed UTF-8 text rows.
+    Raises ValueError for an unrecognized or truncated page, so the fetch retries.
+    """
+    data = page if flight else "".join(json.loads(chunk) for chunk in re.findall(
+        r'self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)', page))
+    # JobSpy slices text rows without checking their declared byte lengths.
+    # Reject an incomplete row before it can be saved as a partial description.
+    raw, pos = data.encode(), 0
+    while match := _TEXT_ROW.match(raw, pos):
+        if match[1]:
+            end = match.end() + int(match[1], 16)
+            if end > len(raw):
+                raise ValueError("Incomplete ZipRecruiter text row")
+            raw[match.end():end].decode()  # also reject a split UTF-8 character
+            pos = end
+        else:
+            pos = raw.find(b"\n", pos) + 1 or len(raw)
+    html = f'<script>self.__next_f.push([1,{json.dumps(data)}])</script>'
+    details = page_values(html, "jobDetails")["jobDetails"]
+    if not isinstance(details, dict):
+        raise ValueError("No ZipRecruiter jobDetails in the page")
+    return details
+
+
 def _description(page: str, flight: bool) -> str:
-    # Flight carries the same rows as HTML's self.__next_f.push scripts. Reuse JobSpy's
-    # decoder, including its references to length-prefixed UTF-8 text rows.
     descriptions: list[str] = []
     if not flight:
         soup = BeautifulSoup(page, "html.parser")
@@ -69,23 +101,7 @@ def _description(page: str, flight: bool) -> str:
                     if isinstance(markup, str):
                         descriptions.append(html_to_text(markup))
     try:
-        data = page if flight else "".join(json.loads(chunk) for chunk in re.findall(
-            r'self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)', page))
-        # JobSpy slices text rows without checking their declared byte lengths.
-        # Reject an incomplete row before it can be saved as a partial description.
-        raw, pos = data.encode(), 0
-        while match := _TEXT_ROW.match(raw, pos):
-            if match[1]:
-                end = match.end() + int(match[1], 16)
-                if end > len(raw):
-                    raise ValueError("Incomplete ZipRecruiter text row")
-                raw[match.end():end].decode()  # also reject a split UTF-8 character
-                pos = end
-            else:
-                pos = raw.find(b"\n", pos) + 1 or len(raw)
-        html = f'<script>self.__next_f.push([1,{json.dumps(data)}])</script>'
-        details = page_values(html, "jobDetails")["jobDetails"]
-        markup = details.get("htmlFullDescription") if isinstance(details, dict) else None
+        markup = _job_details(page, flight).get("htmlFullDescription")
         # A truncated Flight stream can omit a referenced text row. JobSpy then
         # leaves "$1" unchanged; never save that token as a checked description.
         if isinstance(markup, str) and not re.fullmatch(r"\$[0-9a-f]+", markup):
@@ -97,11 +113,47 @@ def _description(page: str, flight: bool) -> str:
     raise ValueError("No ZipRecruiter description in the page")
 
 
+def _status(page: str, flight: bool) -> Liveness:
+    """`deactivatedAtUtc` marks an expired posting; live ones carry `isActive: true`.
+
+    ZipRecruiter lags employers by days and keeps postings active after they close, so callers
+    only trust "alive" where nothing better can answer. A page claiming both is unknown.
+    """
+    status = _job_details(page, flight).get("status")
+    if not isinstance(status, dict):
+        raise ValueError("No ZipRecruiter posting status in the page")
+    deactivated, active = bool(status.get("deactivatedAtUtc")), status.get("isActive") is True
+    if deactivated and active:
+        return "unknown"
+    if deactivated or active:
+        return "gone" if deactivated else "alive"
+    raise ValueError("Unrecognized ZipRecruiter posting status")
+
+
 def fetch_description(url: str, *, delay: float = 2) -> tuple[str, str]:
-    """Try HTML then Flight; all requests and redirects share a four-request budget.
+    """(description, salary); ZipRecruiter's salary already comes from search results."""
+    description = _fetch(url, delay, _description)
+    log.info("ZipRecruiter description has %d characters: %s", len(description), url)
+    return description, ""
+
+
+def check_liveness(url: str, source_id: str, *, delay: float = 2) -> Liveness:
+    """A 404/410 or a deactivated posting is gone; blocks and unrecognized pages are unknown."""
+    try:
+        status = _fetch(url, delay, _status)
+        log.info("ZipRecruiter posting is %s: %s", status, url)
+        return status
+    except requests.HTTPError as exc:
+        return "gone" if exc.response is not None and exc.response.status_code in (404, 410) else "unknown"
+    except (requests.RequestException, ValueError):
+        return "unknown"
+
+
+def _fetch(url: str, delay: float, parse: Callable[[str, bool], T]) -> T:
+    """Try HTML then Flight until `parse` accepts a page; requests and redirects share a four-request budget.
 
     Every request gets a fresh proxy session. Only a ZipRecruiter 404/410 is terminal;
-    challenges, transport errors and unrecognized pages remain pending on exhaustion.
+    challenges, transport errors and pages `parse` rejects with ValueError raise on exhaustion.
     """
     _validate_url(url)
     flight = False
@@ -131,10 +183,9 @@ def fetch_description(url: str, *, delay: float = 2) -> tuple[str, str]:
                 url = urljoin(response.url, redirect[1])
                 _validate_url(url)
                 continue
-            description = _description(response.text, is_flight)
-            log.info("ZipRecruiter described in %d requests, %d characters: %s",
-                     attempt + 1, len(description), url)
-            return description, ""
+            result = parse(response.text, is_flight)
+            log.info("ZipRecruiter %s read in %d requests: %s", parse.__name__.strip("_"), attempt + 1, url)
+            return result
         except RequestException as exc:
             status = exc.response.status_code if exc.response is not None else 0
             if isinstance(status, int) and 100 <= status <= 599:
@@ -152,5 +203,5 @@ def fetch_description(url: str, *, delay: float = 2) -> tuple[str, str]:
         finally:
             session.close()
         flight = True
-    log.warning("ZipRecruiter exhausted %d detail requests: %s", MAX_REQUESTS, url)
+    log.warning("ZipRecruiter exhausted %d requests: %s", MAX_REQUESTS, url)
     raise error
