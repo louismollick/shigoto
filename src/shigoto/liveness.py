@@ -8,19 +8,24 @@ The exception is an Indeed posting hosted on Indeed, where the employer has no o
 
 Indeed is checked in batches up front. Other sources cost one request per posting, capped by
 `liveness_max_per_run`; LinkedIn checks stop for the run at the first inconclusive answer,
-which is usually a rate limit.
+which is usually a rate limit. ZipRecruiter answers only for jobs with no other evidence, when a
+proxy is set. Each posting there costs one unit of budget (up to four paced HTTP requests), is
+asked once per run even when several jobs share its `jid`, and three inconclusive answers in a
+row stop ZipRecruiter checks for the run.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 
 from shigoto.config import Config
 from shigoto.db import FULL_LISTING_SOURCES, LivenessTarget, Store, now_iso
 from shigoto.employer import employer_link
+from shigoto.http import proxy_url
 from shigoto.models import Liveness, SourceLink
-from shigoto.sources import ats, indeed, jobbank, linkedin_detail, oracle, successfactors, workday
+from shigoto.sources import ats, indeed, jobbank, linkedin_detail, oracle, successfactors, workday, ziprecruiter_detail
 
 log = logging.getLogger(__name__)
 _CHECKS: dict[str, Callable[[str, str], Liveness]] = {
@@ -33,7 +38,9 @@ _CHECKS: dict[str, Callable[[str, str], Liveness]] = {
     "oracle": oracle.check_liveness,
     "jobbank": jobbank.check_liveness,
     "linkedin": linkedin_detail.check_liveness,
+    "zip_recruiter": ziprecruiter_detail.check_liveness,
 }
+ZIP_RECRUITER_MAX_UNKNOWN = 3  # consecutive inconclusive postings, usually a proxy or Cloudflare problem
 EMPLOYER_SOURCES = FULL_LISTING_SOURCES | {"oracle"}
 
 
@@ -61,15 +68,18 @@ def employer_pages(target: LivenessTarget) -> list[SourceLink]:
 def check_liveness(store: Store, config: Config, budget: int | None = None) -> dict[str, int]:
     """Check due jobs with `budget` per-posting requests, default `liveness_max_per_run`."""
     now = now_iso()
-    targets = store.liveness_candidates(now)
+    zip_recruiter = proxy_url() is not None
+    targets = store.liveness_candidates(now, zip_recruiter=zip_recruiter)
     indeed_ids = [link.source_id for target in targets for link in target.sources if link.source == "indeed"]
     answers = indeed.check_liveness(indeed_ids) if indeed_ids else {}
     for source_id, found in answers.items():
         if found.apply_url or found.hosted:
             store.record_apply_url("indeed", source_id, found.apply_url)
-    targets = store.liveness_candidates(now)  # now with Indeed's current apply URLs
+    targets = store.liveness_candidates(now, zip_recruiter=zip_recruiter)  # with Indeed's current apply URLs
     budget = config.liveness_max_per_run if budget is None else budget
     linkedin_blocked = False
+    zip_answers: dict[str, Liveness] = {}  # by posting: separate jobs can share one jid
+    zip_unknown = 0
     checked = closed = 0
     for target in targets:
         # No links to check: all are uncheckable, so 30 days unseen is the only evidence.
@@ -80,16 +90,25 @@ def check_liveness(store: Store, config: Config, budget: int | None = None) -> d
                        key=lambda link: (link.source not in EMPLOYER_SOURCES, link.source != "indeed"))
         for link in links:
             answer = answers.get(link.source_id) if link.source == "indeed" else None
+            posting = ziprecruiter_detail.posting_key(link.url) if link.source == "zip_recruiter" else ""
             if link.source == "indeed":
                 value: Liveness = answer.liveness if answer else "unknown"
-            elif budget == 0 or (link.source == "linkedin" and linkedin_blocked):
+            elif posting in zip_answers:
+                value = zip_answers[posting]
+            elif (budget == 0 or (link.source == "linkedin" and linkedin_blocked)
+                  or (posting and zip_unknown >= ZIP_RECRUITER_MAX_UNKNOWN)):
                 result = None  # out of request budget
                 break
             else:
+                if posting and zip_answers:
+                    time.sleep(config.descriptions.ziprecruiter_delay_seconds)
                 budget -= 1
                 spent = True
                 value = check_source(link)
                 linkedin_blocked |= link.source == "linkedin" and value == "unknown"
+                if posting:
+                    zip_answers[posting] = value
+                    zip_unknown = zip_unknown + 1 if value == "unknown" else 0
                 if (value == "unknown" and link in target.sources and link.source in FULL_LISTING_SOURCES
                         and store.dropped_from_listing(link, now)):
                     value = "gone"

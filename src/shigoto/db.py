@@ -381,7 +381,7 @@ class Store:
         )
         self.conn.commit()
 
-    def liveness_candidates(self, now: str) -> list[LivenessTarget]:
+    def liveness_candidates(self, now: str, *, zip_recruiter: bool = False) -> list[LivenessTarget]:
         """Included open jobs due for closure checks, least recently checked first, then stalest.
 
         Excluded jobs, skipped jobs and current AI rejects spend no requests. Applied jobs remain
@@ -395,28 +395,36 @@ class Store:
         Full-listing sources must also be missing from their listings for CLOSED_AFTER;
         a recent sighting there already proves the job is open. Uncheckable links are
         omitted, but an apply URL we can check makes even an uncheckable-only job checkable.
+
+        With `zip_recruiter` (a proxy is set), a wanted job with no other evidence also gets its
+        ZipRecruiter link checked once no link has been seen for CLOSED_AFTER. Its 30-day rule
+        still closes it on time without a request, whatever its backoff.
         """
         cutoff = (datetime.fromisoformat(now) - CLOSED_AFTER).isoformat()
         uncheckable_cutoff = (datetime.fromisoformat(now) - UNCHECKABLE_CLOSED_AFTER).isoformat()
-        full, checkable = sorted(FULL_LISTING_SOURCES), sorted(FULL_LISTING_SOURCES | DIRECT_CHECK_SOURCES)
-        supported = sorted(set(checkable) | UNCHECKABLE_SOURCES)
+
+        def names(sources: frozenset[str] | set[str]) -> str:  # code constants, safe to inline
+            return ",".join(f"'{source}'" for source in sorted(sources))
+
+        checkable = FULL_LISTING_SOURCES | DIRECT_CHECK_SOURCES
         rows = self.conn.execute(
-            f"""SELECT j.job_id, j.updated_at, max(julianday(s.last_seen)) <= julianday(?) AS long_unseen,
-                    max(s.source IN ({",".join("?" * len(checkable))})
-                        OR has_employer_check(s.apply_url)) AS has_checkable_source
+            f"""SELECT j.job_id, j.updated_at, max(julianday(s.last_seen)) <= julianday(:uncheckable) AS long_unseen,
+                    max(s.source IN ({names(checkable)}) OR has_employer_check(s.apply_url)) AS has_checkable_source,
+                    :zip_recruiter AND max(s.source='zip_recruiter') AS has_zip_recruiter,
+                    (j.liveness_checked_at IS NULL OR julianday(j.liveness_checked_at)
+                        <= julianday(:now) - min(1 << max(j.liveness_alive_streak - 1, 0), 4)) AS due
                 FROM jobs j JOIN job_sources s ON s.job_id=j.job_id
-                WHERE j.excluded_at IS NULL AND j.closed_at IS NULL AND (j.liveness_checked_at IS NULL
-                    OR julianday(j.liveness_checked_at)
-                       <= julianday(?) - min(1 << max(j.liveness_alive_streak - 1, 0), 4))
+                WHERE j.excluded_at IS NULL AND j.closed_at IS NULL
                 GROUP BY j.job_id
-                HAVING min(s.source IN ({",".join("?" * len(supported))}))=1
-                    AND CASE WHEN max(s.source IN ({",".join("?" * len(checkable))})
-                                      OR has_employer_check(s.apply_url))=1
-                        THEN coalesce(max(CASE WHEN s.source IN ({",".join("?" * len(full))})
-                                          THEN julianday(s.last_seen) END), 0) < julianday(?)
-                        ELSE max(julianday(s.last_seen)) <= julianday(?) END
+                HAVING min(s.source IN ({names(checkable | UNCHECKABLE_SOURCES)}))=1
+                    AND CASE WHEN has_checkable_source
+                        THEN due AND coalesce(max(CASE WHEN s.source IN ({names(FULL_LISTING_SOURCES)})
+                                                  THEN julianday(s.last_seen) END), 0) < julianday(:cutoff)
+                        WHEN has_zip_recruiter
+                        THEN long_unseen OR (due AND max(julianday(s.last_seen)) < julianday(:cutoff))
+                        ELSE long_unseen END
                 ORDER BY coalesce(julianday(j.liveness_checked_at), 0), max(julianday(s.last_seen)), j.job_id""",
-            (uncheckable_cutoff, *checkable, now, *supported, *checkable, *full, cutoff, uncheckable_cutoff),
+            {"uncheckable": uncheckable_cutoff, "now": now, "cutoff": cutoff, "zip_recruiter": zip_recruiter},
         ).fetchall()
         reviews = self.reviews()
         # Published AI decisions can be newer than the last Sheet backup. Unpublished results
@@ -431,22 +439,26 @@ class Store:
             reviews.setdefault(result["job_id"], {}).update({
                 "AI Decision": fields["decision"], "AI Reviewed At": fields["reviewed_at"],
             })
-        targets = []
+        result = []
         for row in rows:
             review = reviews.get(row["job_id"], {})
             status = review.get("Application Status", "").strip().casefold()
             applied = status == "applied" or bool(review.get("Applied At", "").strip())
             unwanted = status == "skip" or (current_reject(review, row["updated_at"]) and not applied)
-            if not row["has_checkable_source"] or not unwanted:
-                targets.append(row)
-        result = []
-        for row in targets:
+            if row["has_checkable_source"] and unwanted:
+                continue
+            # A wanted ZipRecruiter-only job is checked there until the 30-day rule closes it.
+            zip_recruiter_check = (bool(row["has_zip_recruiter"]) and not row["has_checkable_source"]
+                                   and not row["long_unseen"])
+            if zip_recruiter_check and unwanted:
+                continue
             links = self.conn.execute("SELECT source, source_id, url, apply_url FROM job_sources WHERE job_id=?",
                                       (row["job_id"],)).fetchall()
             result.append(LivenessTarget(
                 row["job_id"],
                 [SourceLink(s["source"], s["source_id"], s["url"]) for s in links
-                 if s["source"] not in UNCHECKABLE_SOURCES],
+                 if s["source"] not in UNCHECKABLE_SOURCES
+                 or (zip_recruiter_check and s["source"] == "zip_recruiter")],
                 [s["apply_url"] for s in links if s["apply_url"]],
                 bool(row["long_unseen"]),
             ))
