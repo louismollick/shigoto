@@ -298,8 +298,9 @@ def test_sheet_reads_are_paced_and_quota_retries_are_bounded(monkeypatch: pytest
 
 
 def test_conflicting_duplicate_overlap_publishes_focus_standalone(tmp_path: Path) -> None:
-    sheet = Worksheet([record("a", **{"Updated At": "2026-10-08T12:00:00-05:00"}),
-                       record("c", **{"Updated At": "2026-10-08T11:00:00-05:00"}), record("b")])
+    sheet = Worksheet([record("a", Description="Test food.", **{"Updated At": "2026-10-08T12:00:00-05:00"}),
+                       record("c", Description="Another plant.", **{"Updated At": "2026-10-08T11:00:00-05:00"}),
+                       record("b")])
     store = Store(tmp_path / "t.db")
 
     def judge(job: ReviewJob, group: list[ReviewJob], config: ReviewConfig) -> Judgment:
@@ -395,7 +396,7 @@ def test_transient_write_retry_keeps_notes(tmp_path: Path) -> None:
 
 
 def test_codex_unavailable_stops_calls_but_publishes_prior_results(tmp_path: Path) -> None:
-    sheet = Worksheet([record("three"), record("two"), record("one")])
+    sheet = Worksheet([record(name, Description=f"Opening {name}.") for name in ("three", "two", "one")])
     calls: list[str] = []
 
     def judge(job: ReviewJob, group: list[ReviewJob], config: ReviewConfig) -> Judgment:
@@ -539,7 +540,7 @@ def add_row(sheet: Worksheet, values: dict[str, str]) -> None:
 
 
 def test_duplicate_changing_or_closing_leaves_reviewed_jobs_alone(tmp_path: Path) -> None:
-    sheet = Worksheet([record("one"), record("two")])
+    sheet = Worksheet([record("one", Description="Plant one."), record("two", Description="Plant two.")])
     store = Store(tmp_path / "t.db")
     judged: list[str] = []
 
@@ -550,7 +551,7 @@ def test_duplicate_changing_or_closing_leaves_reviewed_jobs_alone(tmp_path: Path
     assert run(store, sheet, judge=judge).reviewed == 2
     judged.clear()
     # Dynacare's 27-posting group re-judged its unchanged members on each new posting and closure.
-    add_row(sheet, record("three"))
+    add_row(sheet, record("three", Description="Plant three."))
     report = run(store, sheet, judge=judge)
     assert judged == ["three"] and report.reviewed == 1 and report.pending == 0
     judged.clear()
@@ -715,3 +716,103 @@ def test_dry_run_previews_a_skip_without_saving(tmp_path: Path) -> None:
 def test_annual_maximum_rejects_implausible_hourly_figures() -> None:
     pay = Pay(minimum=2, maximum=2, currency="CAD", unit="hourly", full_time=False, negotiable=False)
     assert annual_maximum(pay) is None
+
+
+def test_identical_repost_reuses_its_twins_judgment_without_codex(tmp_path: Path) -> None:
+    sheet = Worksheet([record("old")])
+    store = Store(tmp_path / "t.db")
+    judged: list[str] = []
+
+    def judge(job: ReviewJob, group: list[ReviewJob], config: ReviewConfig) -> Judgment:
+        judged.append(job.job_id)
+        return judgment(job.job_id, base_score=91)
+
+    run(store, sheet, judge=judge)
+    # A repost under a new ID joins the group and changes its fingerprint; the twin's result still stands.
+    add_row(sheet, record("repost", **{"Updated At": "2026-10-09T10:00:00-05:00"}))
+    report = run(store, sheet, judge=judge)
+    assert judged == ["old"] and (report.reviewed, report.skipped, report.pending) == (1, 1, 0)
+    rows = {row[HEADERS.index("Job ID")]: row for row in sheet.rows[1:]}
+    assert rows["repost"][HEADERS.index("AI Score")] == rows["old"][HEADERS.index("AI Score")] == "91"
+    assert rows["repost"][HEADERS.index("AI Notes")] == rows["old"][HEADERS.index("AI Notes")]
+    saved = Judgment.model_validate_json(store.conn.execute(
+        "SELECT result FROM ai_results WHERE job_id='repost'").fetchone()["result"])
+    assert (saved.canonical_job_id, saved.duplicate_job_ids) == ("repost", [])
+
+
+def test_identical_new_postings_in_one_run_cost_one_codex_call(tmp_path: Path) -> None:
+    sheet = Worksheet([record("one"), record("two")])
+    judged: list[str] = []
+
+    def judge(job: ReviewJob, group: list[ReviewJob], config: ReviewConfig) -> Judgment:
+        judged.append(job.job_id)
+        return judgment(job.job_id)
+
+    report = run(Store(tmp_path / "t.db"), sheet, judge=judge)
+    assert len(judged) == 1 and (report.reviewed, report.skipped) == (2, 1)
+
+
+@pytest.mark.parametrize("change", [{"Salary": "$70,000 CAD/year"}, {"Description": "Test dairy samples."},
+                                    {"Location": "Mississauga"}])
+def test_any_changed_field_still_goes_to_codex(tmp_path: Path, change: dict[str, str]) -> None:
+    sheet = Worksheet([record("old")])
+    store = Store(tmp_path / "t.db")
+    judged: list[str] = []
+
+    def judge(job: ReviewJob, group: list[ReviewJob], config: ReviewConfig) -> Judgment:
+        judged.append(job.job_id)
+        return judgment(job.job_id)
+
+    run(store, sheet, judge=judge)
+    add_row(sheet, record("new", **change))
+    run(store, sheet, judge=judge)
+    assert judged == ["old", "new"]
+
+
+def test_twin_judged_under_another_policy_is_not_reused(tmp_path: Path) -> None:
+    sheet = Worksheet([record("old")])
+    store = Store(tmp_path / "t.db")
+    run(store, sheet, judge=lambda job, *rest: judgment(job.job_id))
+    add_row(sheet, record("repost"))
+    judged: list[str] = []
+
+    def judge(job: ReviewJob, group: list[ReviewJob], config: ReviewConfig) -> Judgment:
+        judged.append(job.job_id)
+        return judgment(job.job_id)
+
+    run(store, sheet, ReviewConfig(reasoning_effort="high"), judge=judge)
+    assert len(judged) == 1  # one fresh judgment, then its twin reuses it
+
+
+def test_twin_result_older_than_its_content_is_not_reused(tmp_path: Path) -> None:
+    sheet = Worksheet([record("old")])
+    store = Store(tmp_path / "t.db")
+    run(store, sheet, judge=lambda job, *rest: judgment(job.job_id))
+    # The twin's content changed after its review: its own result is stale, so the repost goes to Codex.
+    sheet.rows[1][HEADERS.index("Updated At")] = "2099-01-01T00:00:00-05:00"
+    add_row(sheet, record("repost", **{"Updated At": "2099-01-01T00:00:00-05:00"}))
+    judged: list[str] = []
+
+    def judge(job: ReviewJob, group: list[ReviewJob], config: ReviewConfig) -> Judgment:
+        judged.append(job.job_id)
+        return judgment(job.job_id)
+
+    run(store, sheet, ReviewConfig(max_per_run=1), judge=judge)
+    assert len(judged) == 1
+
+
+def test_twin_published_as_a_duplicate_is_not_reused(tmp_path: Path) -> None:
+    # The twin's score came from its canonical's text, which a standalone copy can't see.
+    sheet = Worksheet([record("twin", **{"Updated At": "2026-10-09T10:00:00-05:00"}),
+                       record("complete", Description="Test food samples and maintain QC records. Pay negotiable.")])
+    store = Store(tmp_path / "t.db")
+    run(store, sheet, judge=lambda job, *rest: judgment("complete", duplicate_job_ids=["twin"]))
+    add_row(sheet, record("repost", **{"Updated At": "2026-10-10T10:00:00-05:00"}))
+    judged: list[str] = []
+
+    def judge(job: ReviewJob, group: list[ReviewJob], config: ReviewConfig) -> Judgment:
+        judged.append(job.job_id)
+        return judgment("complete", duplicate_job_ids=["twin", "repost"])
+
+    run(store, sheet, judge=judge)
+    assert judged == ["repost"]

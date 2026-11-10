@@ -9,8 +9,8 @@ from shigoto.config import Config
 from shigoto.db import Store, now_iso
 from shigoto.enrich import enrich_descriptions
 from shigoto.liveness import check_liveness, reset_robots
-from shigoto.models import job_from_json, job_json
-from shigoto.normalize import CityMatcher, normalize, rejection_reason
+from shigoto.models import Job, job_from_json, job_json
+from shigoto.normalize import CityMatcher, RejectionReason, normalize, rejection_reason
 from shigoto.review import review
 from shigoto.sheet_controls import configure_tracker
 from shigoto.sheets import open_worksheet, sync, sync_status
@@ -19,6 +19,15 @@ from shigoto.sources.jobspy_source import JobSpySource
 
 log = logging.getLogger(__name__)
 COMMIT_EVERY = 100
+
+
+def filter_reason(job: Job, matcher: CityMatcher, config: Config) -> RejectionReason | None:
+    """Clean `job` in place and explain why it fails the current filters, or None if it passes."""
+    if normalize(job, matcher, config.title_keywords, config.exclude_title_keywords, config.exclude_companies,
+                 config.exclude_title_exceptions, config.too_far_locations) is not None:
+        return None
+    return rejection_reason(job, config.title_keywords, config.exclude_title_keywords, config.exclude_companies,
+                            config.exclude_title_exceptions, config.too_far_locations)
 
 
 def run_once(config: Config, *, sync_sheet: bool = True, only: set[str] | None = None) -> dict[str, int]:
@@ -89,13 +98,9 @@ def ingest(store: Store, source: Source, matcher: CityMatcher, config: Config) -
             if stats[f"fetched_{source.name}"] % COMMIT_EVERY == 0:
                 store.commit()  # Long sources (Job Bank's first search pass) must not hold the write lock for hours.
             snapshot = job_json(raw)
-            job = normalize(raw, matcher, config.title_keywords, config.exclude_title_keywords,
-                            config.exclude_companies, config.exclude_title_exceptions)
-            if job is None:
+            reason = filter_reason(raw, matcher, config)
+            if reason is not None:
                 stats["dropped"] += 1
-                reason = rejection_reason(raw, config.title_keywords, config.exclude_title_keywords,
-                                          config.exclude_companies, config.exclude_title_exceptions)
-                assert reason is not None
                 stats[f"rejected_{reason}"] += 1
                 known = store.conn.execute("SELECT 1 FROM job_sources WHERE source=? AND source_id=?",
                                            (raw.source, raw.source_id)).fetchone()
@@ -134,14 +139,10 @@ def reprocess(config: Config, *, sync_sheet: bool = True) -> dict[str, int]:
         ).fetchall()
         for record in records:
             job = job_from_json(record["raw"])
-            included = normalize(job, matcher, config.title_keywords, config.exclude_title_keywords,
-                                 config.exclude_companies, config.exclude_title_exceptions)
+            reason = filter_reason(job, matcher, config)
             stats["reprocessed"] += 1
-            if included is None:
+            if reason is not None:
                 stats["dropped"] += 1
-                reason = rejection_reason(job, config.title_keywords, config.exclude_title_keywords,
-                                          config.exclude_companies, config.exclude_title_exceptions)
-                assert reason is not None
                 stats[f"rejected_{reason}"] += 1
             # Existing records still need corrected fields so exclusion uses the replayed title/city.
             stats[store.upsert(job, now, raw=record["raw"], seen=False)] += 1
@@ -151,13 +152,9 @@ def reprocess(config: Config, *, sync_sheet: bool = True) -> dict[str, int]:
         ).fetchall()
         for record in rejected:
             job = job_from_json(record["raw"])
-            included = normalize(job, matcher, config.title_keywords, config.exclude_title_keywords,
-                                 config.exclude_companies, config.exclude_title_exceptions)
+            reason = filter_reason(job, matcher, config)
             stats["reprocessed"] += 1
-            if included is None:
-                reason = rejection_reason(job, config.title_keywords, config.exclude_title_keywords,
-                                          config.exclude_companies, config.exclude_title_exceptions)
-                assert reason is not None
+            if reason is not None:
                 stats["dropped"] += 1
                 stats[f"rejected_{reason}"] += 1
                 store.reject(job, record["raw"], reason, now, seen=False)
