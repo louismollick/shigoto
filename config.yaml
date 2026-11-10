@@ -52,7 +52,7 @@ search_terms:
 cities:
   - name: Calgary
     jobspy_location: Calgary, AB
-    aliases: [Airdrie, Okotoks, Chestermere, Cochrane, Strathmore, High River, Rocky View County]
+    aliases: [Airdrie, Okotoks, Chestermere, Cochrane, Strathmore, High River, Rocky View County, Balzac, Acme]
   - name: Toronto
     jobspy_location: Toronto, ON
     aliases: [Mississauga, Brampton, Markham, Vaughan, Richmond Hill, Etobicoke, Scarborough, North York,
@@ -66,6 +66,13 @@ cities:
   - name: Ottawa
     jobspy_location: Ottawa, ON
     aliases: [Kanata, Nepean, Orleans, Gloucester, Stittsville, Carleton Place, Kemptville, Arnprior, Rockland]
+
+# Over an hour from every target city. JobSpy labels these with the searched city, so a location
+# made up only of them is rejected. Codex rejected all 129 reviewed jobs here (Nov 2026). Keep in
+# step with the review prompt's too_far examples. Gatineau stays: it is next to Ottawa.
+too_far_locations: [Guelph, Cambridge, Kitchener, Waterloo, Barrie, St. Catharines, Niagara Falls, Welland,
+                    Grimsby, Nanaimo, Duncan, Sechelt, Gibsons, Squamish, Salt Spring Island, Chilliwack,
+                    Alliston, Innisfil, Shelburne, Renfrew, Fergus, Elora, Prescott]
 
 # Recency widens after a missed/failed pass. Missing checkpoints trigger a full sweep.
 # LinkedIn rotates focused OR groups, one group across all cities per run, 90s apart; the first
@@ -149,7 +156,16 @@ exclude_title_keywords: [software, SDET, tester, game, games, QA automation, tes
                          # clinical research and IT/data analyst roles.
                          hospital, hematology, BCGEU, CUPE, TA, biologist, clinical research,
                          research coordinator, business, support analyst, systems analyst, data analyst,
-                         AI, analyste]
+                         AI, analyste,
+                         # No reviewed match was Maybe/Recommend or applied to (Nov 9 audit, ~170 reviews):
+                         # medical lab specialties needing CSMLS, nursing, rail/civil/building QC,
+                         # teaching and AI-training gigs. Not "medical laboratory technologist":
+                         # City of Calgary posts its water-lab jobs on Job Bank under that title.
+                         pathology, pathologist, accessioning, transfusion, phlebotom*, x-ray, newborn,
+                         anatomic, cytotechnolog*, medical lab technologist, MLT, charge technologist,
+                         nurse, cath, radiopharm*, cyclotron, photonics, rail, transit, BIM, modeller, civil,
+                         mechanical, architectural, teacher, sessional, demonstrator, expert,
+                         market research]
 
 # Keep senior bench roles: "Senior Quality Lab Technician" (Mondelez) and "Senior QA Technician" (Sunrise
 # Soya) were Recommend-grade with no stated experience minimum. Other senior titles stay excluded.

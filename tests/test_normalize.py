@@ -5,7 +5,8 @@ import pytest
 
 from shigoto.config import City, load_config
 from shigoto.models import Job
-from shigoto.normalize import CityMatcher, dedupe_key, normalize, rejection_reason, title_excluded, title_matches
+from shigoto.normalize import (CityMatcher, dedupe_key, normalize, rejection_reason, title_excluded, title_matches,
+                               too_far)
 
 CITIES = [
     City(name="Toronto", jobspy_location="Toronto, ON", aliases=["Mississauga"]),
@@ -105,6 +106,7 @@ def test_multi_location_drops_foreign_components(location: str) -> None:
 @pytest.mark.parametrize("location,city", [
     ("Rocky View County, AB", "Calgary"), ("Cloverdale, BC", "Vancouver"), ("Mission, BC", "Vancouver"),
     ("Bowmanville, ON", "Toronto"), ("Bradford, ON", "Toronto"), ("Bradford West Gwillimbury, ON", "Toronto"),
+    ("Acme (AB)", "Calgary"), ("Balzac, AB", "Calgary"),
 ])
 def test_new_config_aliases(location: str, city: str) -> None:
     config = load_config(Path("config.yaml"))
@@ -156,3 +158,49 @@ def test_part_time_only_job_type_is_rejected(job_type: str, dropped: bool) -> No
     posting = job(job_type=job_type)
     assert (normalize(posting, matcher, ["QA"], [], []) is None) == dropped
     assert rejection_reason(posting, ["QA"], [], []) == ("job_type" if dropped else None)
+
+
+@pytest.mark.parametrize(("location", "far"), [
+    ("Guelph, ON, Canada", True), ("Guelph (ON)", True), ("st. catharines, Ontario, Canada", True),
+    ("Guelph, ON; Cambridge, ON", True), ("Guelph, ON; Toronto, ON", False), ("Toronto, ON, Canada", False),
+    ("Guelph Line, Burlington, ON", False), ("", False), ("Guelph (ON) Mississauga (ON)", False),
+    ("Cambridge (ON) Guelph (ON)", True),
+])
+def test_too_far_needs_every_place_far(location: str, far: bool) -> None:
+    assert too_far(location, ["Guelph", "Cambridge", "St. Catharines"]) is far
+
+
+def test_too_far_location_rejected_even_with_the_searched_city() -> None:
+    # JobSpy labels a Guelph posting found by the Toronto search with city Toronto.
+    posting = job(location="Guelph, ON", city="Toronto")
+    assert rejection_reason(posting, ["QA"], [], [], None, ["Guelph"]) == "location"
+    assert rejection_reason(job(location="Guelph, ON", city="Toronto"), ["QA"], [], []) is None
+
+
+@pytest.mark.parametrize("location", ["Guelph, ON, Canada", "Nanaimo, BC, Canada", "Barrie (ON)"])
+def test_config_too_far_towns(location: str) -> None:
+    config = load_config(Path("config.yaml"))
+    assert rejection_reason(job(location=location, city="Toronto"), config.title_keywords, config.exclude_title_keywords,
+                            config.exclude_companies, config.exclude_title_exceptions,
+                            config.too_far_locations) == "location"
+
+
+def test_too_far_towns_are_not_aliases() -> None:
+    config = load_config(Path("config.yaml"))
+    aliases = {fold for city in config.cities for fold in map(str.casefold, city.match_names())}
+    assert not aliases & {place.casefold() for place in config.too_far_locations}
+
+
+@pytest.mark.parametrize(("title", "excluded"), [
+    ("Medical Lab Technologist (OPSEU LAB), Microbiology", True), ("Lab Assistant - Accessioning", True),
+    ("Laboratory Technician - Pathology", True), ("QA/QC Inspector, Rail Transit", True),
+    ("Remote Chemistry Expert", True), ("Teacher of Chemistry", True),
+    ("Quality Assurance Associate Consultant - Pharmaceutical", False),
+    ("medical laboratory technologist", False), ("Junior Construction Materials Lab Technician", False),
+    ("Clinical Laboratory Assistant", False), ("Quality Control Technician", False),
+])
+def test_audited_title_exclusions(title: str, excluded: bool) -> None:
+    config = load_config(Path("config.yaml"))
+    reason = rejection_reason(job(title=title, city="Toronto"), config.title_keywords, config.exclude_title_keywords,
+                              config.exclude_companies, config.exclude_title_exceptions)
+    assert (reason == "excluded_title") is excluded

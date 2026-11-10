@@ -21,7 +21,8 @@ from typing import Literal
 from shigoto.config import Config
 from shigoto.employer import employer_link, external_apply_url
 from shigoto.models import Job, Liveness, SourceLink, job_json
-from shigoto.normalize import RejectionReason, dedupe_key, part_time_only, title_excluded, title_matches
+from shigoto.normalize import (RejectionReason, dedupe_key, part_time_only, title_excluded, title_matches,
+                               too_far)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -540,8 +541,10 @@ class Store:
         cutoff = ((datetime.fromisoformat(now).date() - timedelta(days=config.max_posting_age_days)).isoformat()
                   if config.max_posting_age_days is not None else None)
         excluded = 0
-        for row in self.conn.execute("SELECT job_id, city, title, company, job_type, posted_date FROM jobs").fetchall():
-            passes = (row["city"] in cities and title_matches(row["title"], config.title_keywords)
+        rows = self.conn.execute("SELECT job_id, city, location, title, company, job_type, posted_date FROM jobs")
+        for row in rows.fetchall():
+            passes = (row["city"] in cities and not too_far(row["location"], config.too_far_locations)
+                      and title_matches(row["title"], config.title_keywords)
                       and not title_excluded(row["title"], config.exclude_title_keywords,
                                              config.exclude_title_exceptions)
                       and not title_matches(row["company"], config.exclude_companies)

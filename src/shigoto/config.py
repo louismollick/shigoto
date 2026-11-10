@@ -111,6 +111,9 @@ class Config(BaseModel):
     # An exclusion is ignored when the title also matches one of its exceptions ("Senior Lab Technician").
     exclude_title_exceptions: dict[str, list[str]] = Field(default_factory=dict)
     exclude_companies: list[str] = Field(default_factory=list)
+    # Towns over an hour from every target city. JobSpy labels them with the searched city, so a
+    # location made up only of these is rejected even when the city field matches.
+    too_far_locations: list[str] = Field(default_factory=list)
     max_posting_age_days: int | None = Field(default=None, ge=1)
     descriptions: DescriptionFetch = Field(default_factory=DescriptionFetch)
     sheet: SheetConfig

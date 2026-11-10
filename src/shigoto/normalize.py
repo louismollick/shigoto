@@ -68,9 +68,20 @@ def title_excluded(title: str, exclude: list[str], exceptions: Mapping[str, list
     return any(title_matches(title, [k]) and not title_matches(title, exceptions.get(k, [])) for k in exclude)
 
 
+def too_far(location: str, far_places: list[str]) -> bool:
+    """True when every place in the location text is a too-far town: "Guelph, ON, Canada",
+    "Guelph (ON)" or "Guelph, ON; Cambridge, ON", but not "Guelph, ON; Toronto, ON" or Job Bank's
+    "Guelph (ON) Mississauga (ON)"."""
+    far = {fold(place) for place in far_places}
+    places = [fold(re.split(r",|\(", part)[0]).strip() for part in re.split(r";|\|| / |\n|\)\s+", location)]
+    places = [place for place in places if place]
+    return bool(far and places) and all(place in far for place in places)
+
+
 def normalize(job: Job, matcher: CityMatcher, title_keywords: list[str],
               exclude_title_keywords: list[str], exclude_companies: list[str],
-              exclude_title_exceptions: Mapping[str, list[str]] | None = None) -> Job | None:
+              exclude_title_exceptions: Mapping[str, list[str]] | None = None,
+              too_far_locations: list[str] | None = None) -> Job | None:
     """Clean a job in place and return it, or None if it's outside our cities or its title
     doesn't look relevant, or its company is excluded."""
     job.title = clean(job.title)
@@ -81,7 +92,8 @@ def normalize(job: Job, matcher: CityMatcher, title_keywords: list[str],
     job.salary = clean(job.salary)
     job.job_type = clean(job.job_type)
     job.description = clean_description(job.description)
-    reason = rejection_reason(job, title_keywords, exclude_title_keywords, exclude_companies, exclude_title_exceptions)
+    reason = rejection_reason(job, title_keywords, exclude_title_keywords, exclude_companies,
+                              exclude_title_exceptions, too_far_locations)
     return job if reason is None else None
 
 
@@ -96,9 +108,10 @@ RejectionReason = Literal["location", "title", "excluded_title", "company", "job
 
 def rejection_reason(job: Job, title_keywords: list[str], exclude_title_keywords: list[str],
                      exclude_companies: list[str],
-                     exclude_title_exceptions: Mapping[str, list[str]] | None = None) -> RejectionReason | None:
+                     exclude_title_exceptions: Mapping[str, list[str]] | None = None,
+                     too_far_locations: list[str] | None = None) -> RejectionReason | None:
     """Explain a rejection after normalize() has cleaned fields and assigned the city."""
-    if not job.city:
+    if not job.city or too_far(job.location, too_far_locations or []):
         return "location"
     if not job.title or not title_matches(job.title, title_keywords):
         return "title"

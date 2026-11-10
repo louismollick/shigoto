@@ -352,13 +352,15 @@ def config_for(path: Path) -> Config:
     return Config(search_terms=[], cities=[City(name="Toronto", jobspy_location="Toronto")],
                   title_keywords=["QA"], sheet=SheetConfig(), db_path=path)
 
-@pytest.mark.parametrize("change", ["city", "title", "exclude"])
+@pytest.mark.parametrize("change", ["city", "far", "title", "exclude"])
 def test_exclusions_toggle_without_changing_job_history(tmp_path: Path, change: str) -> None:
     store = Store(tmp_path / "t.db")
     store.upsert(job(), "t1")
     config = config_for(tmp_path / "t.db")
     if change == "city":
         config.cities = []
+    elif change == "far":
+        config.too_far_locations = ["Toronto"]
     elif change == "title":
         config.title_keywords = ["Microbiology"]
     else:

@@ -325,6 +325,36 @@ def rule_judgment(job: ReviewJob) -> Judgment | None:
     return None
 
 
+# Every judged field except identity and timing. Reposts under a new ID (LinkedIn, ZipRecruiter
+# jids, Job Bank) often match on all of them.
+POSTING_FIELDS = ["Title", "Company", "Location", "Salary", "Type", "Description", "City"]
+
+
+def twin_judgment(store: Store, job: ReviewJob, group: list[ReviewJob], policy: str,
+                  fingerprints: dict[str, str]) -> Judgment | None:
+    """A current judgment of an identical posting in the group, reused standalone so a repost
+    costs no Codex call. None when no group member has the same fields and a current result.
+    Only a twin judged as its own canonical counts: a duplicate's score can lean on its canonical's
+    pay wording, which a standalone copy wouldn't see."""
+    posting = [job.values.get(name, "") for name in POSTING_FIELDS]
+    for other in group:
+        if other.job_id == job.job_id or [other.values.get(name, "") for name in POSTING_FIELDS] != posting:
+            continue
+        # Current means saved for the group as it is now, or published after the twin's own content.
+        row = store.conn.execute(
+            """SELECT result FROM ai_results WHERE job_id=? AND policy=?
+               AND json_extract(result, '$.canonical_job_id') = job_id
+               AND (fingerprint=? OR julianday(written_at) >= julianday(?))
+               ORDER BY fingerprint=? DESC, written_at DESC LIMIT 1""",
+            (other.job_id, policy, fingerprints[other.job_id], other.values["Updated At"],
+             fingerprints[other.job_id])).fetchone()
+        if row:
+            log.info("Job ID %s: reusing the judgment of identical posting %s", job.job_id, other.job_id)
+            return Judgment.model_validate_json(row["result"]).model_copy(
+                update={"canonical_job_id": job.job_id, "duplicate_job_ids": []})
+    return None
+
+
 def run_codex(focus: ReviewJob, group: list[ReviewJob], config: ReviewConfig) -> Judgment:
     """A fresh, tool-free CLI invocation using a dedicated saved ChatGPT login."""
     with TemporaryDirectory(prefix="shigoto-review-") as directory:
@@ -476,6 +506,7 @@ def review_rows(store: Store, ws: gspread.Worksheet, config: ReviewConfig, *, dr
     prepared: dict[str, AIFields] = {}
     by_id = {job.job_id: job for job in jobs}
     selected_ids = {job.job_id for job in selected}
+    reused: set[str] = set()  # published from an identical posting's judgment
     for job in selected:
         if job.job_id in prepared:
             continue
@@ -484,8 +515,13 @@ def review_rows(store: Store, ws: gspread.Worksheet, config: ReviewConfig, *, dr
         try:
             cached = store.conn.execute("SELECT result FROM ai_results WHERE job_id=? AND fingerprint=? AND policy=?",
                                         (job.job_id, fingerprint, policy)).fetchone()
-            result = (Judgment.model_validate_json(cached["result"]) if cached
-                      else rule_judgment(job) or judge(job, group, config))
+            if cached:
+                result = Judgment.model_validate_json(cached["result"])
+            elif (twin := twin_judgment(store, job, group, policy, fingerprints)) is not None:
+                result = twin
+                reused.add(job.job_id)
+            else:
+                result = rule_judgment(job) or judge(job, group, config)
             validate_references(result, job, group)
             # Never overwrite a member of an already confirmed group with a conflicting
             # canonical. Publish this job on its own instead, leaving other members' results
@@ -566,7 +602,7 @@ def review_rows(store: Store, ws: gspread.Worksheet, config: ReviewConfig, *, dr
                             job.job_id, fingerprints[job.job_id], policy))
         store.commit()
         decisions[fields.decision] += 1
-        report.skipped += fields.notes.startswith(SKIPPED)
+        report.skipped += fields.notes.startswith(SKIPPED) or job.job_id in reused
     report.reviewed = sum(decisions.values())
     report.recommend, report.maybe, report.reject = (decisions[name] for name in ("Recommend", "Maybe", "Reject"))
     # Report the live backlog after writes, so changed/added rows remain visible.
