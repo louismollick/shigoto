@@ -133,7 +133,7 @@ class JobSpySource:
                             if not detector.failed:
                                 break
                             if attempt + 1 < attempts:
-                                log.info("%s %r in %s: retrying from a new proxy IP", self.name, query, city.name)
+                                log.info("%s %r in %s: retrying", self.name, query, city.name)
                                 time.sleep(_PROXY_RETRY_SECONDS)
                         if detector.failed:
                             complete = False
