@@ -82,6 +82,7 @@ def test_failed_solves_are_budgeted(byparr: Mock) -> None:
     ("response status code 403 (blocked: use a proxy)", 2),
     ("Failed to perform, curl: (56) CONNECT tunnel failed", 2),
     ("response status code 429 (blocked: use a proxy)", 1),
+    ("response status code 500", 1),
 ])
 def test_search_uses_clearance_and_resolves_only_after_a_challenge(
         error: str, solves: int, byparr: Mock, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
@@ -103,7 +104,7 @@ def test_search_uses_clearance_and_resolves_only_after_a_challenge(
     site = JobSpySite(site="zip_recruiter", use_proxy=True, delay_seconds=0)
     list(JobSpySource(site, ["lab"], [City(name="Toronto", jobspy_location="Toronto, ON")], store).fetch())
     store.close()
-    # A challenge or dead exit re-solves from a new IP; a rate limit keeps the clearance.
+    # A challenge or dead exit re-solves from a new IP; rate limits and server errors keep the clearance.
     assert len(calls) == 2 and byparr.call_count == solves
     assert all(";sessid." in str(c["proxies"]) for c in calls)
     assert (calls[0]["proxies"] != calls[1]["proxies"]) == (solves == 2)

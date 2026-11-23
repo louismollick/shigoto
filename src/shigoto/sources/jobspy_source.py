@@ -28,7 +28,9 @@ log = logging.getLogger(__name__)
 
 # 403 is a bot challenge (ZipRecruiter on datacenter IPs); 429/999 are rate limits. All block the run.
 _BLOCKED = re.compile(r"\b(403|429|999)\b")
-_RATE_LIMITED = re.compile(r"\b(429|999)\b")  # a rate limit keeps a Cloudflare clearance; other failures drop it
+# A Cloudflare challenge or a curl transport failure (dead sticky exit IP) needs a new clearance.
+# Rate limits, server errors and page-parsing failures keep it.
+_CLEARANCE_LOST = re.compile(r"\b403\b|curl: \(\d+\)")
 _PROXY_ATTEMPTS = 5  # each retry gets a new Cloudflare clearance or rotating-proxy IP
 _PROXY_RETRY_SECONDS = 5
 
@@ -39,14 +41,14 @@ class _BlockDetector(logging.Handler):
     def __init__(self) -> None:
         super().__init__(logging.ERROR)
         self.blocked = False
-        self.rate_limited = False
+        self.clearance_lost = False
         self.failed = False
 
     def emit(self, record: logging.LogRecord) -> None:
         self.failed = True
         msg = record.getMessage()
         self.blocked |= bool(_BLOCKED.search(msg))
-        self.rate_limited |= bool(_RATE_LIMITED.search(msg))
+        self.clearance_lost |= bool(_CLEARANCE_LOST.search(msg))
 
 
 def build_queries(terms: list[str], combine: bool) -> list[str]:
@@ -117,7 +119,7 @@ class JobSpySource:
                         # so a proxied attempt often ends early with a 429 but its rows are still real.
                         found: dict[str, Job] = {}
                         for attempt in range(attempts):
-                            detector.failed = detector.blocked = detector.rate_limited = False
+                            detector.failed = detector.blocked = detector.clearance_lost = False
                             cleared = cloudflare.clearance() if proxied and self.name == "zip_recruiter" else None
                             try:
                                 for job in self._search(query, city, hours_old, results_wanted, cleared):
@@ -125,10 +127,9 @@ class JobSpySource:
                             except Exception as error:
                                 detector.failed = True
                                 detector.blocked = bool(_BLOCKED.search(str(error)))
-                                detector.rate_limited = bool(_RATE_LIMITED.search(str(error)))
+                                detector.clearance_lost = bool(_CLEARANCE_LOST.search(str(error)))
                                 log.warning("%s %r in %s failed: %s", self.name, query, city.name, error)
-                            # A challenge or a dead sticky exit IP needs a new clearance.
-                            if cleared and detector.failed and not detector.rate_limited:
+                            if cleared and detector.clearance_lost:
                                 cloudflare.invalidate(cleared)
                             if not detector.failed:
                                 break
