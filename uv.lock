@@ -1005,8 +1005,8 @@ wheels = [
 
 [[package]]
 name = "python-jobspy"
-version = "1.4.0"
-source = { git = "https://github.com/speedyapply/JobSpy?rev=cd8b367a476dc1ba2182c1aa38012f82ed29446f#cd8b367a476dc1ba2182c1aa38012f82ed29446f" }
+version = "1.5.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "curl-cffi" },
@@ -1014,6 +1014,10 @@ dependencies = [
     { name = "pandas" },
     { name = "pydantic" },
     { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0e/56/f70766c889942ce09dc9c623e5f136128b3b05587fb14eea1f27fd41b8b0/python_jobspy-1.5.0.tar.gz", hash = "sha256:d02853f3f958d916ed9ffcb049557b209f5c09498732be6bf7adee8a9a4f2d4c", size = 60454, upload-time = "2026-11-20T18:31:14.691Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/17/cd/c7c1b8d208b43fbcc4ec9dc5bcc3f49dc251abd4bf686be1d2324f871adc/python_jobspy-1.5.0-py3-none-any.whl", hash = "sha256:83deebd0e50493cec0f2211b522a341a161b70db208e935806b2c6802f13d053", size = 74521, upload-time = "2026-11-20T18:31:13.483Z" },
 ]
 
 [[package]]
@@ -1117,7 +1121,7 @@ requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.15.0" },
     { name = "gspread", specifier = ">=6.2.1" },
     { name = "pydantic", specifier = ">=2.13.5" },
-    { name = "python-jobspy", git = "https://github.com/speedyapply/JobSpy?rev=cd8b367a476dc1ba2182c1aa38012f82ed29446f" },
+    { name = "python-jobspy", specifier = "==1.5.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "requests", specifier = ">=2.34.2" },
 ]

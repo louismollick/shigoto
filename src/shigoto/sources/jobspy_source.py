@@ -7,15 +7,20 @@ import logging
 import math
 import re
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
+import jobspy.ziprecruiter
 from jobspy import scrape_jobs
+from jobspy.model import ScraperInput
+from jobspy.util import TLSRotating
 
 from shigoto.config import City, JobSpySite
 from shigoto.db import Store, now_iso
 from shigoto.http import proxy_url
 from shigoto.models import Job
+from shigoto.sources import cloudflare
 from shigoto.text import clean, clean_description, parse_date
 
 log = logging.getLogger(__name__)
@@ -23,7 +28,10 @@ log = logging.getLogger(__name__)
 
 # 403 is a bot challenge (ZipRecruiter on datacenter IPs); 429/999 are rate limits. All block the run.
 _BLOCKED = re.compile(r"\b(403|429|999)\b")
-_PROXY_ATTEMPTS = 5  # ~65% of proxied ZipRecruiter requests get 403; 5 tries clear ~88% of queries
+# A Cloudflare challenge or a curl transport failure (dead sticky exit IP) needs a new clearance.
+# Rate limits, server errors and page-parsing failures keep it.
+_CLEARANCE_LOST = re.compile(r"\b403\b|curl: \(\d+\)")
+_PROXY_ATTEMPTS = 5  # each retry gets a new Cloudflare clearance or rotating-proxy IP
 _PROXY_RETRY_SECONDS = 5
 
 
@@ -33,13 +41,14 @@ class _BlockDetector(logging.Handler):
     def __init__(self) -> None:
         super().__init__(logging.ERROR)
         self.blocked = False
+        self.clearance_lost = False
         self.failed = False
 
     def emit(self, record: logging.LogRecord) -> None:
         self.failed = True
         msg = record.getMessage()
-        if _BLOCKED.search(msg):
-            self.blocked = True
+        self.blocked |= bool(_BLOCKED.search(msg))
+        self.clearance_lost |= bool(_CLEARANCE_LOST.search(msg))
 
 
 def build_queries(terms: list[str], combine: bool) -> list[str]:
@@ -110,18 +119,22 @@ class JobSpySource:
                         # so a proxied attempt often ends early with a 429 but its rows are still real.
                         found: dict[str, Job] = {}
                         for attempt in range(attempts):
-                            detector.failed = detector.blocked = False
+                            detector.failed = detector.blocked = detector.clearance_lost = False
+                            cleared = cloudflare.clearance() if proxied and self.name == "zip_recruiter" else None
                             try:
-                                for job in self._search(query, city, hours_old, results_wanted):
+                                for job in self._search(query, city, hours_old, results_wanted, cleared):
                                     found.setdefault(job.source_id, job)
                             except Exception as error:
                                 detector.failed = True
                                 detector.blocked = bool(_BLOCKED.search(str(error)))
+                                detector.clearance_lost = bool(_CLEARANCE_LOST.search(str(error)))
                                 log.warning("%s %r in %s failed: %s", self.name, query, city.name, error)
+                            if cleared and detector.clearance_lost:
+                                cloudflare.invalidate(cleared)
                             if not detector.failed:
                                 break
                             if attempt + 1 < attempts:
-                                log.info("%s %r in %s: retrying from a new proxy IP", self.name, query, city.name)
+                                log.info("%s %r in %s: retrying", self.name, query, city.name)
                                 time.sleep(_PROXY_RETRY_SECONDS)
                         if detector.failed:
                             complete = False
@@ -146,23 +159,48 @@ class JobSpySource:
         finally:
             jobspy_logger.removeHandler(detector)
 
-    def _search(self, query: str, city: City, hours_old: int | None, results_wanted: int) -> Iterator[Job]:
-        df = scrape_jobs(
-            site_name=[self.name],
-            search_term=query,
-            location=city.jobspy_location,
-            results_wanted=results_wanted,
-            hours_old=hours_old,
-            country_indeed="Canada",
-            description_format="markdown",
-            proxies=proxy_url() if self.site.use_proxy else None,
-            verbose=1,
-        )
+    def _search(self, query: str, city: City, hours_old: int | None, results_wanted: int,
+                cleared: cloudflare.Clearance | None = None) -> Iterator[Job]:
+        with _zip_recruiter_clearance(cleared):
+            df = scrape_jobs(
+                site_name=[self.name],
+                search_term=query,
+                location=city.jobspy_location,
+                results_wanted=results_wanted,
+                hours_old=hours_old,
+                country_indeed="Canada",
+                description_format="markdown",
+                # A clearance only holds from the sticky IP that solved it.
+                proxies=cleared.proxy if cleared else proxy_url() if self.site.use_proxy else None,
+                verbose=1,
+            )
         log.info("%s %r in %s: %d results", self.name, query[:40], city.name, len(df))
         for row in df.to_dict("records"):
             job = row_to_job({str(key): value for key, value in row.items()}, city.name)
             if job:
                 yield job
+
+
+@contextmanager
+def _zip_recruiter_clearance(cleared: cloudflare.Clearance | None) -> Iterator[None]:
+    """JobSpy builds its ZipRecruiter session internally, so wrap that factory to add the clearance."""
+    if cleared is None:
+        yield
+        return
+    original: Callable[[TLSRotating, ScraperInput, dict[str, str] | None], TLSRotating] = getattr(
+        jobspy.ziprecruiter, "create_session")
+
+    def create(session: TLSRotating, scraper_input: ScraperInput,
+               headers: dict[str, str] | None = None) -> TLSRotating:
+        session = original(session, scraper_input, headers)
+        cloudflare.apply(session, cleared)
+        return session
+
+    setattr(jobspy.ziprecruiter, "create_session", create)
+    try:
+        yield
+    finally:
+        setattr(jobspy.ziprecruiter, "create_session", original)
 
 
 def row_to_job(row: Mapping[str, object], city: str) -> Job | None:

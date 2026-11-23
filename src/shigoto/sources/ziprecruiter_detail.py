@@ -21,6 +21,7 @@ from jobspy.ziprecruiter.util import page_values
 
 from shigoto.http import proxy_url
 from shigoto.models import Liveness
+from shigoto.sources import cloudflare
 from shigoto.text import html_to_text
 
 log = logging.getLogger(__name__)
@@ -152,7 +153,8 @@ def check_liveness(url: str, source_id: str, *, delay: float = 2) -> Liveness:
 def _fetch(url: str, delay: float, parse: Callable[[str, bool], T]) -> T:
     """Try HTML then Flight until `parse` accepts a page; requests and redirects share a four-request budget.
 
-    Every request gets a fresh proxy session. Only a ZipRecruiter 404/410 is terminal;
+    Every request gets a fresh session: from the Cloudflare clearance's sticky IP when Byparr is
+    configured, otherwise from a new rotating-proxy IP. Only a ZipRecruiter 404/410 is terminal;
     challenges, transport errors and pages `parse` rejects with ValueError raise on exhaustion.
     """
     _validate_url(url)
@@ -162,7 +164,10 @@ def _fetch(url: str, delay: float, parse: Callable[[str, bool], T]) -> T:
         if attempt and delay:
             time.sleep(delay * min(2 ** (attempt - 1), 4))
         request_url = _flight_url(url) if flight else url
-        session = create_session(proxy_url())
+        cleared = cloudflare.clearance()
+        session = create_session(cleared.proxy if cleared else proxy_url())
+        if cleared:
+            cloudflare.apply(session, cleared)
         try:
             # Follow redirects ourselves so each hop is paced, budgeted and host-checked.
             response = session.get(request_url, timeout=30, allow_redirects=False,
@@ -192,10 +197,14 @@ def _fetch(url: str, delay: float, parse: Callable[[str, bool], T]) -> T:
                 error_response = requests.Response()
                 error_response.status_code = status
                 error = requests.HTTPError(f"ZipRecruiter HTTP {status}", response=error_response)
+                if status == 403 and cleared:
+                    cloudflare.invalidate(cleared)
                 if status not in (403, 429) and status < 500:
                     raise error from exc
             else:
                 error = requests.RequestException("ZipRecruiter detail connection failed")
+                if cleared:
+                    cloudflare.invalidate(cleared)  # the sticky exit IP may be gone
         except _UnsafeURL:
             raise
         except ValueError as exc:
