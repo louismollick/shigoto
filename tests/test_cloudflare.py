@@ -83,14 +83,14 @@ def test_failed_solves_are_budgeted(byparr: Mock) -> None:
     assert byparr.call_count == 2 * cloudflare.MAX_SOLVES
 
 
-@pytest.mark.parametrize("error, solves", [
-    ("response status code 403 (blocked: use a proxy)", 2),
-    ("Failed to perform, curl: (56) CONNECT tunnel failed", 2),
-    ("response status code 429 (blocked: use a proxy)", 1),
-    ("response status code 500", 1),
+@pytest.mark.parametrize("error, solves, searches", [
+    ("response status code 403 (blocked: use a proxy)", 2, 2),
+    ("Failed to perform, curl: (56) CONNECT tunnel failed", 2, 2),
+    ("response status code 429 (blocked: use a proxy)", 1, 1),  # one fixed IP: stop, don't retry
+    ("response status code 500", 1, 2),
 ])
 def test_search_uses_clearance_and_resolves_only_after_a_challenge(
-        error: str, solves: int, byparr: Mock, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        error: str, solves: int, searches: int, byparr: Mock, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     calls: list[dict[str, object]] = []
     session = Mock(cookies=Cookies(), headers={})
 
@@ -110,7 +110,7 @@ def test_search_uses_clearance_and_resolves_only_after_a_challenge(
     list(JobSpySource(site, ["lab"], [City(name="Toronto", jobspy_location="Toronto, ON")], store).fetch())
     store.close()
     # A challenge or dead proxy re-solves; rate limits and server errors keep the clearance.
-    assert len(calls) == 2 and byparr.call_count == solves
+    assert len(calls) == searches and byparr.call_count == solves
     assert all(c["proxies"] == PROXY for c in calls)
     assert session.cookies.get("cf_clearance", domain=".ziprecruiter.com") == "ok"
     assert session.headers["User-Agent"] == "Firefox/159.0"

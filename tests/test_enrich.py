@@ -234,7 +234,7 @@ def test_ziprecruiter_description(monkeypatch: MonkeyPatch, fallback: bool, zip_
     session.close.assert_called_once()
 
 
-@pytest.mark.parametrize('status', [200, 403, 404, 410])
+@pytest.mark.parametrize('status', [200, 429, 404, 410])
 def test_ziprecruiter_failure_continues(store: Store, monkeypatch: MonkeyPatch, status: int, zip_clearance: object) -> None:
     first = add_job(store, 'zip_recruiter', 'first')
     second = add_job(store, 'zip_recruiter', 'second')
@@ -451,3 +451,26 @@ def test_copied_sibling_description_brings_its_salary(store: Store) -> None:
     enrich._enrich(store, 'zip_recruiter', 25, Mock(), delay=0, posting_key=ziprecruiter_detail.posting_key)
     row = store.conn.execute('SELECT * FROM jobs WHERE job_id=?', (copy,)).fetchone()
     assert row['salary'] == '$60,000 yearly'
+
+
+def test_ziprecruiter_challenge_stops_remaining_postings(store: Store, monkeypatch: MonkeyPatch,
+                                                         zip_clearance: object) -> None:
+    first = add_job(store, 'zip_recruiter', 'first')
+    second = add_job(store, 'zip_recruiter', 'second')
+    store.conn.execute('UPDATE jobs SET first_seen=? WHERE job_id=?', ('2026-10-14', first))
+    store.commit()
+    session = Mock()
+    session.get.return_value.url = 'https://www.ziprecruiter.com/job/1'
+    session.get.return_value.status_code = 403
+    session.get.return_value.headers = {}
+    session.get.return_value.raise_for_status.side_effect = CurlHTTPError(
+        'challenge', response=session.get.return_value)
+    factory = Mock(return_value=session)
+    monkeypatch.setattr(ziprecruiter_detail, 'create_session', factory)
+    config = Config.model_validate({'search_terms': [], 'cities': [], 'title_keywords': [], 'sheet': {},
+                                   'descriptions': {'ziprecruiter_delay_seconds': 0}})
+    assert enrich.enrich_descriptions(store, config)['described_zip_recruiter'] == 0
+    # The challenge dropped the clearance; the other posting waits for the next run's search.
+    assert factory.call_count == 1
+    attempted = {r['job_id']: r['description_attempted_at'] for r in store.conn.execute('SELECT * FROM jobs')}
+    assert attempted[first] and attempted[second] is None

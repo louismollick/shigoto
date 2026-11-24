@@ -93,7 +93,7 @@ class JobSpySource:
         if zip_recruiter and not cloudflare.configured():
             log.info("zip_recruiter skipped: SHIGOTO_BYPARR_URL and SHIGOTO_ZIPRECRUITER_PROXY are required")
             return
-        proxied = zip_recruiter or self.site.use_proxy and proxy_url() is not None
+        proxied = zip_recruiter or (self.site.use_proxy and proxy_url() is not None)
         attempts = _PROXY_ATTEMPTS if proxied else 1
         jobspy_logger.addHandler(detector)
         try:
@@ -143,6 +143,13 @@ class JobSpySource:
                                 log.warning("%s %r in %s failed: %s", self.name, query, city.name, error)
                             if cleared and detector.clearance_lost:
                                 cloudflare.invalidate(cleared)
+                            elif zip_recruiter and detector.blocked:
+                                # A rate limit from its one fixed IP won't clear on retry.
+                                log.warning("%s %r in %s rate limited; stopping source for this run",
+                                            self.name, query, city.name)
+                                self.incomplete = True
+                                yield from found.values()
+                                return
                             if not detector.failed:
                                 break
                             if attempt + 1 < attempts:

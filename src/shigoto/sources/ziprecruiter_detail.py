@@ -153,12 +153,15 @@ def _fetch(url: str, delay: float, parse: Callable[[str, bool], T]) -> T:
     """Try HTML then Flight until `parse` accepts a page; requests and redirects share a four-request budget.
 
     Every request gets a fresh session carrying the clearance a search left (it never solves); with
-    no clearance it raises without a request. Only a ZipRecruiter 404/410 is terminal; challenges,
-    transport errors and pages `parse` rejects with ValueError raise on exhaustion.
+    no clearance it raises without a request. A 403 drops the clearance. Only a ZipRecruiter 404/410
+    is terminal; challenges, transport errors and pages `parse` rejects with ValueError raise on
+    exhaustion, and when every request failed in transport the proxy is presumed down and the
+    clearance is dropped too, so later fetches don't each wait out their timeouts.
     """
     _validate_url(url)
     flight = False
     error: requests.RequestException | ValueError = ValueError("ZipRecruiter redirect budget exhausted")
+    transport_failures = 0
     for attempt in range(MAX_REQUESTS):
         if attempt and delay:
             time.sleep(delay * min(2 ** (attempt - 1), 4))
@@ -204,7 +207,7 @@ def _fetch(url: str, delay: float, parse: Callable[[str, bool], T]) -> T:
                     raise error from exc
             else:
                 error = requests.RequestException("ZipRecruiter detail connection failed")
-                cloudflare.invalidate(cleared)  # the proxy may be gone; don't wait out every timeout
+                transport_failures += 1
         except _UnsafeURL:
             raise
         except ValueError as exc:
@@ -213,4 +216,6 @@ def _fetch(url: str, delay: float, parse: Callable[[str, bool], T]) -> T:
             session.close()
         flight = True
     log.warning("ZipRecruiter exhausted %d requests: %s", MAX_REQUESTS, url)
+    if transport_failures == MAX_REQUESTS and (cleared := cloudflare.current()):
+        cloudflare.invalidate(cleared)
     raise error

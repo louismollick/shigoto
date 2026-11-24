@@ -43,18 +43,21 @@ def enrich_descriptions(store: Store, config: Config) -> dict[str, int]:
             lambda t: ziprecruiter_detail.fetch_description(t.url, delay=d.ziprecruiter_delay_seconds),
             delay=d.ziprecruiter_delay_seconds, stop_on_failure=False,
             posting_key=ziprecruiter_detail.posting_key,
-        # Uses the clearance this run's searches left; without one every fetch would fail.
-        ) if cloudflare.current() else 0,
+            # Fetches use the clearance this run's searches left; once it's gone they all would fail.
+            available=lambda: cloudflare.current() is not None,
+        ),
     }
 
 
 def _enrich(store: Store, source: str, limit: int, fetch: Callable[[DescriptionTarget], tuple[str, str]],
-            delay: float, stop_on_failure: bool = True, posting_key: Callable[[str], str] | None = None) -> int:
+            delay: float, stop_on_failure: bool = True, posting_key: Callable[[str], str] | None = None,
+            available: Callable[[], bool] = lambda: True) -> int:
     """`fetch` returns (description, salary). Failed jobs stay unchecked and rotate behind other pending jobs.
 
     With `posting_key`, jobs whose URLs share a key are one posting: a blank job first copies an
     already described sibling's text, then each remaining posting costs one fetch and fills every
-    pending job in its group. `limit` caps postings, not jobs. Returns the number of jobs described.
+    pending job in its group. `limit` caps postings, not jobs. Fetching stops once `available` is
+    false; copies from described siblings don't need it. Returns the number of jobs described.
     """
     done = 0
     attempted = 0
@@ -75,6 +78,9 @@ def _enrich(store: Store, source: str, limit: int, fetch: Callable[[DescriptionT
     # posting ahead of untried ones. The stable sort keeps newest-first order among untried postings.
     ordered = sorted(groups.values(), key=lambda g: max((t.attempted_at or "" for t in g), default=""))
     for group in ordered[:limit]:
+        if not available():
+            log.warning("%s descriptions unavailable; stopping for this run", source)
+            break
         target = group[0]
         # Pace the next job after every outcome, including blocked or unrecognized pages.
         if attempted and delay:
