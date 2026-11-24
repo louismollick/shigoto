@@ -2,7 +2,7 @@
 
 LinkedIn, ZipRecruiter and Job Bank search results carry no description. Retry missing
 descriptions, capped per source. Direct LinkedIn fetches stop at the first sign of blocking;
-proxied ones skip to the next job. ZipRecruiter requires a proxy and skips failed jobs for later
+proxied ones skip to the next job. ZipRecruiter requires a Cloudflare clearance and skips failed jobs for later
 retry. It lists one posting under several search keys, so its jobs are grouped by posting and
 each posting is fetched once.
 """
@@ -19,7 +19,7 @@ import requests
 from shigoto.config import Config
 from shigoto.db import DescriptionTarget, Store, now_iso
 from shigoto.http import RateLimited, RobotsDisallowed, proxy_url
-from shigoto.sources import jobbank, linkedin_detail, ziprecruiter_detail
+from shigoto.sources import cloudflare, jobbank, linkedin_detail, ziprecruiter_detail
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +43,8 @@ def enrich_descriptions(store: Store, config: Config) -> dict[str, int]:
             lambda t: ziprecruiter_detail.fetch_description(t.url, delay=d.ziprecruiter_delay_seconds),
             delay=d.ziprecruiter_delay_seconds, stop_on_failure=False,
             posting_key=ziprecruiter_detail.posting_key,
-        ) if proxied else 0,
+        # Searches earlier in the run usually left a clearance; without one every fetch would fail.
+        ) if cloudflare.configured() and cloudflare.clearance() else 0,
     }
 
 

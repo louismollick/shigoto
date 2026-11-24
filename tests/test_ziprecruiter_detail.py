@@ -18,6 +18,11 @@ HTML = '<script type="application/ld+json">' + json.dumps(
     {'@type': 'JobPosting', 'description': '<p>Analyze samples.</p>'}) + '</script>'
 
 
+@pytest.fixture(autouse=True)
+def cleared(zip_clearance: object) -> None:
+    """Every test here fetches with a solved Cloudflare clearance."""
+
+
 def response(status: int = 200, text: str = HTML, *, flight: bool = False,
              location: str = '') -> Mock:
     result = Mock(status_code=status, url=URL, text=text)

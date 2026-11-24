@@ -779,7 +779,7 @@ def add_zip(store: Store, source_id: str, title: str = "QA", jid: str = "1",
 
 def zip_mode(monkeypatch: MonkeyPatch, checks: dict[str, Liveness] | None = None,
              proxy: str | None = "http://proxy:1") -> list[SourceLink]:
-    monkeypatch.setattr("shigoto.liveness.proxy_url", lambda: proxy)
+    monkeypatch.setattr("shigoto.liveness.cloudflare.configured", lambda: proxy is not None)
     monkeypatch.setattr("shigoto.liveness.time.sleep", lambda seconds: None)
     return freeze(monkeypatch, checks=checks)
 
