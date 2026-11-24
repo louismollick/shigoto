@@ -152,8 +152,8 @@ def check_liveness(url: str, source_id: str, *, delay: float = 2) -> Liveness:
 def _fetch(url: str, delay: float, parse: Callable[[str, bool], T]) -> T:
     """Try HTML then Flight until `parse` accepts a page; requests and redirects share a four-request budget.
 
-    Every request gets a fresh session carrying the Cloudflare clearance from its static IP; with no
-    clearance it raises without a request. Only a ZipRecruiter 404/410 is terminal; challenges,
+    Every request gets a fresh session carrying the clearance a search left (it never solves); with
+    no clearance it raises without a request. Only a ZipRecruiter 404/410 is terminal; challenges,
     transport errors and pages `parse` rejects with ValueError raise on exhaustion.
     """
     _validate_url(url)
@@ -163,7 +163,7 @@ def _fetch(url: str, delay: float, parse: Callable[[str, bool], T]) -> T:
         if attempt and delay:
             time.sleep(delay * min(2 ** (attempt - 1), 4))
         request_url = _flight_url(url) if flight else url
-        cleared = cloudflare.clearance()
+        cleared = cloudflare.current()
         if cleared is None:
             # The static IP is always challenged without a clearance, so don't spend a request.
             raise requests.RequestException("No ZipRecruiter Cloudflare clearance")
@@ -204,6 +204,7 @@ def _fetch(url: str, delay: float, parse: Callable[[str, bool], T]) -> T:
                     raise error from exc
             else:
                 error = requests.RequestException("ZipRecruiter detail connection failed")
+                cloudflare.invalidate(cleared)  # the proxy may be gone; don't wait out every timeout
         except _UnsafeURL:
             raise
         except ValueError as exc:

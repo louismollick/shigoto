@@ -24,10 +24,8 @@ SOLVE_URL = "https://www.ziprecruiter.com/jobs-search?search=laboratory&location
 # Most solves finish in 20-35s. A failed solve keeps the browser loading ZipRecruiter until the
 # timeout (about 78 MB at 90s), so a short timeout matters more than the rare slow success.
 SOLVE_TIMEOUT_SECONDS = 45
-# About half of solves fail. Runs are 6 hours apart, so this is a per-run budget in practice;
-# a manual run is its own process and gets its own.
+# About half of solves fail. Only a run's searches solve (see `clearance`), so this caps a run.
 MAX_SOLVES = 4
-SOLVE_WINDOW_SECONDS = 6 * 3600
 
 
 @dataclass(frozen=True)
@@ -38,11 +36,11 @@ class Clearance:
 
 
 _current: Clearance | None = None
-_solves: list[float] = []
+_solves_left = MAX_SOLVES
 
 
 def proxy() -> str | None:
-    """Static residential proxy URL (`http://user:pass@host:port`) for every ZipRecruiter request."""
+    """Fixed-exit-IP proxy URL (`http://user:pass@host:port`) for every ZipRecruiter request and solve."""
     return os.environ.get("SHIGOTO_ZIPRECRUITER_PROXY") or None
 
 
@@ -50,27 +48,31 @@ def configured() -> bool:
     return bool(os.environ.get("SHIGOTO_BYPARR_URL") and proxy())
 
 
-def clearance() -> Clearance | None:
-    """The current clearance, solving until one works when there is none.
+def start_run() -> None:
+    """Give a run its solve budget. The clearance itself carries over between runs."""
+    global _solves_left
+    _solves_left = MAX_SOLVES
 
-    A clearance is kept until ZipRecruiter challenges a request made with it (see `invalidate`).
-    Returns None when Byparr or the proxy isn't configured or every solve the budget allows failed.
-    """
-    global _current
-    byparr, static = os.environ.get("SHIGOTO_BYPARR_URL"), proxy()
-    if not _current and byparr and static:
-        while not _current and _spend_solve():
-            _current = _solve(byparr, static)
+
+def current() -> Clearance | None:
+    """The clearance searches left, without solving. Descriptions and closure checks use this,
+    so the 10-minute liveness ticks between runs never spend a run's solves."""
     return _current
 
 
-def _spend_solve() -> bool:
-    now = time.monotonic()
-    _solves[:] = [at for at in _solves if now - at < SOLVE_WINDOW_SECONDS]
-    if len(_solves) >= MAX_SOLVES:
-        return False
-    _solves.append(now)
-    return True
+def clearance() -> Clearance | None:
+    """The current clearance, solving until one works when there is none. Only searches call this.
+
+    A clearance is kept until ZipRecruiter challenges a request made with it or the proxy stops
+    answering (see `invalidate`). Returns None when Byparr or the proxy isn't configured or every
+    solve left in the run's budget failed.
+    """
+    global _current, _solves_left
+    byparr, static = os.environ.get("SHIGOTO_BYPARR_URL"), proxy()
+    while not _current and byparr and static and _solves_left > 0:
+        _solves_left -= 1
+        _current = _solve(byparr, static)
+    return _current
 
 
 def _solve(byparr: str, static: str) -> Clearance | None:
@@ -104,10 +106,11 @@ def _solve(byparr: str, static: str) -> Clearance | None:
 
 
 def invalidate(cleared: Clearance) -> None:
-    """Drop a clearance that ZipRecruiter challenged again; the next request solves a new one."""
+    """Drop a clearance that ZipRecruiter challenged again or whose proxy stopped answering.
+    The next search solves again, within the run's budget."""
     global _current
     if _current is cleared:
-        log.info("ZipRecruiter rejected a cleared request; solving again on the next request")
+        log.info("ZipRecruiter rejected a cleared request or its proxy failed; dropping the clearance")
         _current = None
 
 

@@ -43,8 +43,8 @@ def enrich_descriptions(store: Store, config: Config) -> dict[str, int]:
             lambda t: ziprecruiter_detail.fetch_description(t.url, delay=d.ziprecruiter_delay_seconds),
             delay=d.ziprecruiter_delay_seconds, stop_on_failure=False,
             posting_key=ziprecruiter_detail.posting_key,
-        # Searches earlier in the run usually left a clearance; without one every fetch would fail.
-        ) if cloudflare.configured() and cloudflare.clearance() else 0,
+        # Uses the clearance this run's searches left; without one every fetch would fail.
+        ) if cloudflare.current() else 0,
     }
 
 

@@ -14,7 +14,7 @@ from shigoto.db import Store
 from shigoto.http import PoliteSession, RateLimited, RobotsDisallowed, posting_liveness
 from shigoto.liveness import check_liveness, check_source
 from shigoto.models import Job, Liveness, SourceLink
-from shigoto.sources import ats, indeed, jobbank, linkedin_detail, oracle, successfactors, workday
+from shigoto.sources import ats, cloudflare, indeed, jobbank, linkedin_detail, oracle, successfactors, workday
 from shigoto.sources.indeed import IndeedAnswer
 
 CHECKS: list[tuple[Callable[[str, str], Liveness], PoliteSession, str, str, object]] = [
@@ -777,9 +777,13 @@ def add_zip(store: Store, source_id: str, title: str = "QA", jid: str = "1",
     return str(store.conn.execute("SELECT job_id FROM job_sources WHERE source_id=?", (source_id,)).fetchone()[0])
 
 
+_CLEARED = cloudflare.Clearance("http://proxy:1", "Firefox/159.0", {"cf_clearance": "ok"})
+
+
 def zip_mode(monkeypatch: MonkeyPatch, checks: dict[str, Liveness] | None = None,
              proxy: str | None = "http://proxy:1") -> list[SourceLink]:
     monkeypatch.setattr("shigoto.liveness.cloudflare.configured", lambda: proxy is not None)
+    monkeypatch.setattr("shigoto.liveness.cloudflare.current", lambda: _CLEARED if proxy else None)
     monkeypatch.setattr("shigoto.liveness.time.sleep", lambda seconds: None)
     return freeze(monkeypatch, checks=checks)
 
@@ -810,6 +814,18 @@ def test_zip_recruiter_is_not_checked_without_a_proxy(monkeypatch: MonkeyPatch, 
     calls = zip_mode(monkeypatch, {"zip_recruiter": "gone"}, proxy=None)
     assert check_liveness(store, config()) == {"liveness_checked": 0, "closed": 0}
     assert calls == []
+    store.close()
+
+
+def test_zip_recruiter_without_clearance_spends_nothing(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    add_zip(store, "zr-1")
+    calls = zip_mode(monkeypatch, {"zip_recruiter": "gone"})
+    # Configured, but this run's searches left no clearance: skip without marking it checked.
+    monkeypatch.setattr("shigoto.liveness.cloudflare.current", lambda: None)
+    assert check_liveness(store, config()) == {"liveness_checked": 0, "closed": 0}
+    assert calls == []
+    assert store.conn.execute("SELECT liveness_checked_at FROM jobs").fetchone()[0] is None
     store.close()
 
 

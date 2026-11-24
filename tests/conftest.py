@@ -8,9 +8,9 @@ CLEARED = cloudflare.Clearance("http://proxy.test", "Firefox/159.0", {"cf_cleara
 
 @pytest.fixture
 def zip_clearance(monkeypatch: MonkeyPatch) -> cloudflare.Clearance:
-    """ZipRecruiter configured with a clearance already solved, so detail fetches send requests."""
+    """ZipRecruiter configured with a clearance a search already solved, so detail fetches send requests."""
     monkeypatch.setenv("SHIGOTO_ZIPRECRUITER_PROXY", CLEARED.proxy)
     monkeypatch.setenv("SHIGOTO_BYPARR_URL", "http://byparr.test")
-    monkeypatch.setattr(cloudflare, "clearance", lambda: CLEARED)
+    monkeypatch.setattr(cloudflare, "current", lambda: CLEARED)
     monkeypatch.setattr(cloudflare, "apply", lambda session, cleared: None)  # sessions are plain Mocks
     return CLEARED

@@ -28,9 +28,9 @@ log = logging.getLogger(__name__)
 
 # 403 is a bot challenge (ZipRecruiter on datacenter IPs); 429/999 are rate limits. All block the run.
 _BLOCKED = re.compile(r"\b(403|429|999)\b")
-# A Cloudflare challenge needs a new clearance. Rate limits, server errors, transport failures
-# and page-parsing failures keep it.
-_CLEARANCE_LOST = re.compile(r"\b403\b")
+# A Cloudflare challenge needs a new clearance, and a curl transport failure means the proxy may be
+# down, so both drop it. Rate limits, server errors and parsing failures keep it.
+_CLEARANCE_LOST = re.compile(r"\b403\b|curl: \(\d+\)")
 _PROXY_ATTEMPTS = 5  # each retry gets a new rotating-proxy IP, or a new clearance after a challenge
 _PROXY_RETRY_SECONDS = 5
 
@@ -90,7 +90,10 @@ class JobSpySource:
         # requests share one IP, so they stop at the first block. ZipRecruiter uses its own static
         # IP with a Cloudflare clearance, which a challenged retry re-solves.
         zip_recruiter = self.name == "zip_recruiter"
-        proxied = cloudflare.configured() if zip_recruiter else self.site.use_proxy and proxy_url() is not None
+        if zip_recruiter and not cloudflare.configured():
+            log.info("zip_recruiter skipped: SHIGOTO_BYPARR_URL and SHIGOTO_ZIPRECRUITER_PROXY are required")
+            return
+        proxied = zip_recruiter or self.site.use_proxy and proxy_url() is not None
         attempts = _PROXY_ATTEMPTS if proxied else 1
         jobspy_logger.addHandler(detector)
         try:
@@ -122,12 +125,13 @@ class JobSpySource:
                         found: dict[str, Job] = {}
                         for attempt in range(attempts):
                             detector.failed = detector.blocked = detector.clearance_lost = False
-                            cleared = cloudflare.clearance() if proxied and zip_recruiter else None
-                            if proxied and zip_recruiter and cleared is None:
-                                # Its static IP is always challenged without a clearance.
+                            cleared = cloudflare.clearance() if zip_recruiter else None
+                            if zip_recruiter and cleared is None:
+                                # Its proxy's IP is always challenged without a clearance.
                                 log.warning("%s has no Cloudflare clearance; stopping source for this run",
                                             self.name)
                                 self.incomplete = True
+                                yield from found.values()
                                 return
                             try:
                                 for job in self._search(query, city, hours_old, results_wanted, cleared):

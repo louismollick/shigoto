@@ -95,7 +95,7 @@ def check_liveness(store: Store, config: Config, budget: int | None = None) -> d
             elif posting in zip_answers:
                 value = zip_answers[posting]
             elif (budget == 0 or (link.source == "linkedin" and linkedin_blocked)
-                  or (posting and zip_unknown >= ZIP_RECRUITER_MAX_UNKNOWN)):
+                  or (posting and (zip_unknown >= ZIP_RECRUITER_MAX_UNKNOWN or cloudflare.current() is None))):
                 result = None  # out of request budget
                 break
             else:

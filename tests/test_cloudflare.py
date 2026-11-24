@@ -35,7 +35,7 @@ def byparr(monkeypatch: MonkeyPatch) -> Iterator[Mock]:
     monkeypatch.setenv("SHIGOTO_ZIPRECRUITER_PROXY", PROXY)
     monkeypatch.setenv("SHIGOTO_BYPARR_URL", "http://byparr:8191")
     monkeypatch.setattr(cloudflare, "_current", None)
-    monkeypatch.setattr(cloudflare, "_solves", [])
+    monkeypatch.setattr(cloudflare, "_solves_left", cloudflare.MAX_SOLVES)
     post = Mock(return_value=solved())
     monkeypatch.setattr("shigoto.sources.cloudflare.requests.post", post)
     yield post
@@ -78,13 +78,14 @@ def test_failed_solves_are_budgeted(byparr: Mock) -> None:
     assert [cloudflare.clearance() for _ in range(8)] == [None] * 8
     assert byparr.call_count == cloudflare.MAX_SOLVES
     byparr.side_effect = requests.ConnectionError("down")
-    cloudflare._solves.clear()
+    cloudflare.start_run()
     assert cloudflare.clearance() is None
+    assert byparr.call_count == 2 * cloudflare.MAX_SOLVES
 
 
 @pytest.mark.parametrize("error, solves", [
     ("response status code 403 (blocked: use a proxy)", 2),
-    ("Failed to perform, curl: (56) CONNECT tunnel failed", 1),
+    ("Failed to perform, curl: (56) CONNECT tunnel failed", 2),
     ("response status code 429 (blocked: use a proxy)", 1),
     ("response status code 500", 1),
 ])
@@ -108,7 +109,7 @@ def test_search_uses_clearance_and_resolves_only_after_a_challenge(
     site = JobSpySite(site="zip_recruiter", delay_seconds=0)
     list(JobSpySource(site, ["lab"], [City(name="Toronto", jobspy_location="Toronto, ON")], store).fetch())
     store.close()
-    # Only a challenge re-solves; rate limits, transport and server errors keep the clearance.
+    # A challenge or dead proxy re-solves; rate limits and server errors keep the clearance.
     assert len(calls) == 2 and byparr.call_count == solves
     assert all(c["proxies"] == PROXY for c in calls)
     assert session.cookies.get("cf_clearance", domain=".ziprecruiter.com") == "ok"
@@ -117,19 +118,26 @@ def test_search_uses_clearance_and_resolves_only_after_a_challenge(
     assert getattr(jobspy.ziprecruiter, "create_session") is original
 
 
-def test_detail_fetch_uses_clearance_and_drops_it_on_challenge(byparr: Mock, monkeypatch: MonkeyPatch) -> None:
+def test_detail_fetch_uses_the_search_clearance_and_never_solves(byparr: Mock, monkeypatch: MonkeyPatch) -> None:
     challenge = Mock(status_code=403, url=URL)
     challenge.raise_for_status.side_effect = HTTPError("challenge", response=challenge)
     page = Mock(status_code=200, url=URL, text=HTML, headers={"Content-Type": "text/html"})
     clients = [Mock(cookies=Cookies(), headers={}) for _ in range(2)]
-    for client, reply in zip(clients, [challenge, page]):
+    for client, reply in zip(clients, [page, challenge]):
         client.get.return_value = reply
     monkeypatch.setattr(z, "create_session", Mock(side_effect=clients))
     monkeypatch.setattr("shigoto.sources.ziprecruiter_detail.time.sleep", lambda seconds: None)
+    with pytest.raises(requests.RequestException):
+        z.fetch_description(URL)  # no search has solved yet, so nothing is sent
+    assert byparr.call_count == 0
+    assert cloudflare.clearance()  # a search solves
     assert z.fetch_description(URL) == ("Analyze samples.", "")
+    assert clients[0].cookies.get("cf_clearance", domain=".ziprecruiter.com") == "ok"
+    # A challenge drops the clearance; the fetch then stops instead of solving.
+    with pytest.raises(requests.RequestException):
+        z.fetch_description(URL)
+    assert cloudflare.current() is None and byparr.call_count == 1
     assert [call.args[0] for call in getattr(z, "create_session").call_args_list] == [PROXY, PROXY]
-    assert all(c.cookies.get("cf_clearance", domain=".ziprecruiter.com") == "ok" for c in clients)
-    assert byparr.call_count == 2
 
 
 def test_search_stops_without_clearance(byparr: Mock, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
@@ -147,10 +155,10 @@ def test_search_stops_without_clearance(byparr: Mock, tmp_path: Path, monkeypatc
 
 
 def test_detail_fetch_sends_nothing_without_clearance(byparr: Mock, monkeypatch: MonkeyPatch) -> None:
-    byparr.return_value = solved({"__cf_bm": "x"})
     session = Mock()
     monkeypatch.setattr(z, "create_session", session)
     with pytest.raises(requests.RequestException):
         z.fetch_description(URL)
     assert z.check_liveness(URL, "zr-1") == "unknown"
     session.assert_not_called()
+    byparr.assert_not_called()
