@@ -1,5 +1,6 @@
 """Typed app configuration, loaded from config.yaml plus env vars for secrets/paths:
-GOOGLE_APPLICATION_CREDENTIALS, SHIGOTO_SPREADSHEET_ID, SHIGOTO_DB, SHIGOTO_PROXY (see http.proxy_url)."""
+GOOGLE_APPLICATION_CREDENTIALS, SHIGOTO_SPREADSHEET_ID, SHIGOTO_DB, SHIGOTO_PROXY (see http.proxy_url),
+SHIGOTO_ZIPRECRUITER_PROXY and SHIGOTO_BYPARR_URL (see sources.cloudflare)."""
 
 from __future__ import annotations
 

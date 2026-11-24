@@ -133,7 +133,7 @@ def test_rotation_and_independent_group_checkpoints(store: Store, monkeypatch: p
     assert store.get_meta("jobspy:linkedin:next_group") == "4"
     assert store.conn.execute("SELECT count(*) FROM meta WHERE key LIKE '%:last_success'").fetchone()[0] == 3
     # A different source has no checkpoint even after LinkedIn completed.
-    list(source(store, JobSpySite(site="zip_recruiter", delay_seconds=0)).fetch())
+    list(source(store, JobSpySite(site="glassdoor", delay_seconds=0)).fetch())
     assert calls[-1]["hours_old"] is None
 
 

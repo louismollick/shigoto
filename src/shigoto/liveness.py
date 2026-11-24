@@ -23,9 +23,8 @@ from collections.abc import Callable
 from shigoto.config import Config
 from shigoto.db import FULL_LISTING_SOURCES, LivenessTarget, Store, now_iso
 from shigoto.employer import employer_link
-from shigoto.http import proxy_url
 from shigoto.models import Liveness, SourceLink
-from shigoto.sources import ats, indeed, jobbank, linkedin_detail, oracle, successfactors, workday, ziprecruiter_detail
+from shigoto.sources import ats, cloudflare, indeed, jobbank, linkedin_detail, oracle, successfactors, workday, ziprecruiter_detail
 
 log = logging.getLogger(__name__)
 _CHECKS: dict[str, Callable[[str, str], Liveness]] = {
@@ -68,7 +67,7 @@ def employer_pages(target: LivenessTarget) -> list[SourceLink]:
 def check_liveness(store: Store, config: Config, budget: int | None = None) -> dict[str, int]:
     """Check due jobs with `budget` per-posting requests, default `liveness_max_per_run`."""
     now = now_iso()
-    zip_recruiter = proxy_url() is not None
+    zip_recruiter = cloudflare.configured()
     targets = store.liveness_candidates(now, zip_recruiter=zip_recruiter)
     indeed_ids = [link.source_id for target in targets for link in target.sources if link.source == "indeed"]
     answers = indeed.check_liveness(indeed_ids) if indeed_ids else {}
@@ -96,7 +95,7 @@ def check_liveness(store: Store, config: Config, budget: int | None = None) -> d
             elif posting in zip_answers:
                 value = zip_answers[posting]
             elif (budget == 0 or (link.source == "linkedin" and linkedin_blocked)
-                  or (posting and zip_unknown >= ZIP_RECRUITER_MAX_UNKNOWN)):
+                  or (posting and (zip_unknown >= ZIP_RECRUITER_MAX_UNKNOWN or cloudflare.current() is None))):
                 result = None  # out of request budget
                 break
             else:

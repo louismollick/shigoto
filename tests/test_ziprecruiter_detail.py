@@ -8,6 +8,7 @@ import requests
 from curl_cffi.requests.exceptions import HTTPError, RequestException
 from pytest import MonkeyPatch
 
+from shigoto.sources import cloudflare
 from shigoto.sources import ziprecruiter_detail as z
 from shigoto.db import Store
 from shigoto.enrich import _enrich
@@ -16,6 +17,11 @@ from shigoto.models import Job
 URL = 'https://www.ziprecruiter.com/c/Acme/Job/Lab/-in-Toronto,ON?jid=1'
 HTML = '<script type="application/ld+json">' + json.dumps(
     {'@type': 'JobPosting', 'description': '<p>Analyze samples.</p>'}) + '</script>'
+
+
+@pytest.fixture(autouse=True)
+def cleared(zip_clearance: object) -> None:
+    """Every test here fetches with a solved Cloudflare clearance."""
 
 
 def response(status: int = 200, text: str = HTML, *, flight: bool = False,
@@ -37,10 +43,10 @@ def sessions(monkeypatch: MonkeyPatch, replies: list[Mock]) -> list[Mock]:
     return clients
 
 
-def test_challenge_then_flight_redirect_then_utf8_description(monkeypatch: MonkeyPatch) -> None:
+def test_rate_limit_then_flight_redirect_then_utf8_description(monkeypatch: MonkeyPatch) -> None:
     markup = '<p>Contrôle qualité, café et échantillons.</p>'
     stream = '0:{"jobDetails":{"htmlFullDescription":"$1"}}\n1:T' + f'{len(markup.encode()):x},' + markup
-    clients = sessions(monkeypatch, [response(403), response(text='0:{"digest":'
+    clients = sessions(monkeypatch, [response(429), response(text='0:{"digest":'
         '"NEXT_REDIRECT;replace;/c/acme/Job/Lab?jid=1;308;"}', flight=True),
         response(text=stream, flight=True)])
     waits: list[float] = []
@@ -67,9 +73,9 @@ def test_http_redirect_is_paced_and_consumes_budget(monkeypatch: MonkeyPatch) ->
     assert clients[1].get.call_args.args[0] == 'https://www.ziprecruiter.com/c/canonical/Job/Lab?jid=1'
 
 
-@pytest.mark.parametrize('failure', ['challenge', 'empty', 'transport', 'redirect_loop'])
+@pytest.mark.parametrize('failure', ['rate_limited', 'empty', 'transport', 'redirect_loop'])
 def test_every_failure_and_redirect_shares_a_fixed_budget(monkeypatch: MonkeyPatch, failure: str) -> None:
-    replies = [response(403) if failure == 'challenge' else response(text='Unrecognized page')
+    replies = [response(429) if failure == 'rate_limited' else response(text='Unrecognized page')
                for _ in range(z.MAX_REQUESTS)]
     if failure == 'redirect_loop':
         replies = [response(308, location=URL) for _ in range(z.MAX_REQUESTS)]
@@ -85,6 +91,18 @@ def test_every_failure_and_redirect_shares_a_fixed_budget(monkeypatch: MonkeyPat
     for client in clients:
         client.get.assert_called_once()
         client.close.assert_called_once()
+    # Only a proxy that failed every request is presumed down.
+    assert (cloudflare.current() is None) == (failure == 'transport')
+
+
+def test_challenge_drops_clearance_and_stops(monkeypatch: MonkeyPatch) -> None:
+    clients = sessions(monkeypatch, [response(403), response()])
+    monkeypatch.setattr('shigoto.sources.ziprecruiter_detail.time.sleep', lambda seconds: None)
+    with pytest.raises(requests.RequestException):
+        z.fetch_description(URL)
+    assert cloudflare.current() is None
+    clients[0].get.assert_called_once()
+    clients[1].get.assert_not_called()  # only a search may solve again
 
 
 @pytest.mark.parametrize('status', [404, 410])
@@ -132,7 +150,7 @@ def test_unresolved_flight_reference_stays_pending_after_retries(tmp_path: Path,
                      company='Acme', city='Toronto', location='Toronto'), '2026-10-16T00:00:00+00:00')
     store.commit()
     stream = '0:{"jobDetails":{"htmlFullDescription":"$1"}}\n'
-    clients = sessions(monkeypatch, [response(403), *[response(text=stream, flight=True)
+    clients = sessions(monkeypatch, [response(429), *[response(text=stream, flight=True)
                                                     for _ in range(z.MAX_REQUESTS - 1)]])
     assert _enrich(store, 'zip_recruiter', 25, lambda t: z.fetch_description(t.url, delay=0),
                    delay=0, stop_on_failure=False) == 0

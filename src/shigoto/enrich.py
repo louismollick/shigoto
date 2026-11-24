@@ -2,7 +2,7 @@
 
 LinkedIn, ZipRecruiter and Job Bank search results carry no description. Retry missing
 descriptions, capped per source. Direct LinkedIn fetches stop at the first sign of blocking;
-proxied ones skip to the next job. ZipRecruiter requires a proxy and skips failed jobs for later
+proxied ones skip to the next job. ZipRecruiter requires a Cloudflare clearance and skips failed jobs for later
 retry. It lists one posting under several search keys, so its jobs are grouped by posting and
 each posting is fetched once.
 """
@@ -19,7 +19,7 @@ import requests
 from shigoto.config import Config
 from shigoto.db import DescriptionTarget, Store, now_iso
 from shigoto.http import RateLimited, RobotsDisallowed, proxy_url
-from shigoto.sources import jobbank, linkedin_detail, ziprecruiter_detail
+from shigoto.sources import cloudflare, jobbank, linkedin_detail, ziprecruiter_detail
 
 log = logging.getLogger(__name__)
 
@@ -43,17 +43,21 @@ def enrich_descriptions(store: Store, config: Config) -> dict[str, int]:
             lambda t: ziprecruiter_detail.fetch_description(t.url, delay=d.ziprecruiter_delay_seconds),
             delay=d.ziprecruiter_delay_seconds, stop_on_failure=False,
             posting_key=ziprecruiter_detail.posting_key,
-        ) if proxied else 0,
+            # Fetches use the clearance this run's searches left; once it's gone they all would fail.
+            available=lambda: cloudflare.current() is not None,
+        ),
     }
 
 
 def _enrich(store: Store, source: str, limit: int, fetch: Callable[[DescriptionTarget], tuple[str, str]],
-            delay: float, stop_on_failure: bool = True, posting_key: Callable[[str], str] | None = None) -> int:
+            delay: float, stop_on_failure: bool = True, posting_key: Callable[[str], str] | None = None,
+            available: Callable[[], bool] = lambda: True) -> int:
     """`fetch` returns (description, salary). Failed jobs stay unchecked and rotate behind other pending jobs.
 
     With `posting_key`, jobs whose URLs share a key are one posting: a blank job first copies an
     already described sibling's text, then each remaining posting costs one fetch and fills every
-    pending job in its group. `limit` caps postings, not jobs. Returns the number of jobs described.
+    pending job in its group. `limit` caps postings, not jobs. Fetching stops once `available` is
+    false; copies from described siblings don't need it. Returns the number of jobs described.
     """
     done = 0
     attempted = 0
@@ -74,6 +78,9 @@ def _enrich(store: Store, source: str, limit: int, fetch: Callable[[DescriptionT
     # posting ahead of untried ones. The stable sort keeps newest-first order among untried postings.
     ordered = sorted(groups.values(), key=lambda g: max((t.attempted_at or "" for t in g), default=""))
     for group in ordered[:limit]:
+        if not available():
+            log.warning("%s descriptions unavailable; stopping for this run", source)
+            break
         target = group[0]
         # Pace the next job after every outcome, including blocked or unrecognized pages.
         if attempted and delay:

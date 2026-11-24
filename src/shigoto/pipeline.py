@@ -14,7 +14,7 @@ from shigoto.normalize import CityMatcher, RejectionReason, normalize, rejection
 from shigoto.review import review
 from shigoto.sheet_controls import configure_tracker
 from shigoto.sheets import open_worksheet, sync, sync_status
-from shigoto.sources import Source, build_sources
+from shigoto.sources import Source, build_sources, cloudflare
 from shigoto.sources.jobspy_source import JobSpySource
 
 log = logging.getLogger(__name__)
@@ -37,6 +37,7 @@ def run_once(config: Config, *, sync_sheet: bool = True, only: set[str] | None =
     stats: Counter[str] = Counter()
     try:
         reset_robots()
+        cloudflare.start_run()
         matcher = CityMatcher(config.cities)
         for source in build_sources(config, matcher, store):
             if only is None or source.name in only:

@@ -76,7 +76,8 @@ too_far_locations: [Guelph, Cambridge, Kitchener, Waterloo, Barrie, St. Catharin
 
 # Recency widens after a missed/failed pass. Missing checkpoints trigger a full sweep.
 # LinkedIn rotates focused OR groups, one group across all cities per run, 90s apart; the first
-# city rotates too. LinkedIn and ZipRecruiter block datacenter IPs, so they use SHIGOTO_PROXY when set.
+# city rotates too. LinkedIn uses SHIGOTO_PROXY when set; ZipRecruiter needs SHIGOTO_ZIPRECRUITER_PROXY
+# and SHIGOTO_BYPARR_URL to get past Cloudflare.
 # Indeed searches every term x city, with a weekly full sweep to catch indexing lag.
 jobspy:
   - site: indeed
@@ -104,7 +105,6 @@ jobspy:
     delay_seconds: 90
   # Small per-term caps limit pagination; delays between searches reduce blocking risk.
   - site: zip_recruiter
-    use_proxy: true
     results_wanted: 20
     full_sweep_results_wanted: 20
     hours_old: 168
