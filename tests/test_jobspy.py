@@ -276,9 +276,11 @@ def test_proxied_linkedin_waits_out_rate_limits(store: Store, monkeypatch: pytes
                                                found: bool) -> None:
     calls: list[object] = []
     sleeps: list[float] = []
+    pages: list[tuple[object, object]] = []
 
     def scrape(**kwargs: object) -> pd.DataFrame:
         calls.append(kwargs["search_term"])
+        pages.append((kwargs["offset"], kwargs["results_wanted"]))
         rows = [{"site": "linkedin", "id": f"li-{len(calls)}", "job_url": "https://example.com/1",
                  "title": "QA technician"}]
         if len(calls) <= failures:
@@ -292,6 +294,10 @@ def test_proxied_linkedin_waits_out_rate_limits(store: Store, monkeypatch: pytes
     adapter = source(store, JobSpySite(site="linkedin", use_proxy=True, delay_seconds=0))
     jobs = [j.source_id for j in adapter.fetch()]
     assert sleeps[:_ATTEMPTS - 1] == [_PROXIED_RETRY_SECONDS] * (_ATTEMPTS - 1)
+    # Each retry resumes after the rows already found and asks only for the rest.
+    wanted = pages[0][1]
+    assert isinstance(wanted, int)
+    assert pages[:_ATTEMPTS] == [(i, wanted - i) for i in range(_ATTEMPTS)]
     first_term = [f"li-{i}" for i in range(1, _ATTEMPTS + 1)]
     if found:
         # The last try succeeds, so the second term runs too.

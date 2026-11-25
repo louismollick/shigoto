@@ -130,7 +130,8 @@ class JobSpySource:
                 for city in cities:
                     for query in group_queries:
                         # Union of every attempt's rows: a deep search is ~30 pages, so an attempt that
-                        # fails partway still found real rows.
+                        # fails partway still found real rows. LinkedIn retries resume after them, since
+                        # its limit allows only a few pages a minute; ZipRecruiter restarts.
                         found: dict[str, Job] = {}
                         for attempt in range(attempts):
                             detector.failed = detector.blocked = detector.clearance_lost = False
@@ -142,8 +143,10 @@ class JobSpySource:
                                 self.incomplete = True
                                 yield from found.values()
                                 return
+                            offset = 0 if zip_recruiter else len(found)
                             try:
-                                for job in self._search(query, city, hours_old, results_wanted, cleared):
+                                for job in self._search(query, city, hours_old, results_wanted - offset, cleared,
+                                                        offset):
                                     found.setdefault(job.source_id, job)
                             except Exception as error:
                                 detector.failed = True
@@ -194,13 +197,14 @@ class JobSpySource:
             jobspy_logger.removeHandler(detector)
 
     def _search(self, query: str, city: City, hours_old: int | None, results_wanted: int,
-                cleared: cloudflare.Clearance | None = None) -> Iterator[Job]:
+                cleared: cloudflare.Clearance | None = None, offset: int = 0) -> Iterator[Job]:
         with _zip_recruiter_clearance(cleared):
             df = scrape_jobs(
                 site_name=[self.name],
                 search_term=query,
                 location=city.jobspy_location,
                 results_wanted=results_wanted,
+                offset=offset,
                 hours_old=hours_old,
                 country_indeed="Canada",
                 description_format="markdown",
