@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
+import jobspy.linkedin
 import jobspy.ziprecruiter
 from jobspy import scrape_jobs
 from jobspy.model import ScraperInput
@@ -31,8 +32,15 @@ _BLOCKED = re.compile(r"\b(403|429|999)\b")
 # A Cloudflare challenge needs a new clearance, and a curl transport failure means the proxy may be
 # down, so both drop it. Rate limits, server errors and parsing failures keep it.
 _CLEARANCE_LOST = re.compile(r"\b403\b|curl: \(\d+\)")
-_PROXY_ATTEMPTS = 5  # each retry gets a new rotating-proxy IP, or a new clearance after a challenge
-_PROXY_RETRY_SECONDS = 5
+_ATTEMPTS = 5  # retries ride out transient errors and short rate limits, or get a new clearance
+_ZIP_RECRUITER_RETRY_SECONDS = 5
+# Through the static proxy LinkedIn's occasional 429 clears within a minute (Nov 2026), and any
+# retry restarts at page 1, so it waits longer than the ~30s between pages.
+_PROXIED_RETRY_SECONDS = 60
+
+# LinkedIn rations each IP: through the static proxy, pages 12s apart got 429 every other request,
+# while 30s apart passed 10 of 10 (Nov 2026). JobSpy waits 3-7s between pages by default.
+setattr(jobspy.linkedin.LinkedIn, "delay", (25, 35))
 
 
 class _BlockDetector(logging.Handler):
@@ -85,16 +93,17 @@ class JobSpySource:
             selected = [counter % len(queries)]
             start = counter % len(cities)
             cities = cities[start:] + cities[:start]
-        # A rotating proxy gives each connection a new exit IP, so a block or dropped connection
-        # usually clears on retry, and one blocked city says nothing about the next. Direct
-        # requests share one IP, so they stop at the first block. ZipRecruiter uses its own static
-        # IP with a Cloudflare clearance, which a challenged retry re-solves.
+        # Every request leaves from one IP, the VPS's or SHIGOTO_PROXY's. Direct searches stop at the
+        # first block. Proxied ones retry, waiting out a rate limit, and stop once retries run out.
+        # ZipRecruiter retries transient errors and re-solves a challenged clearance, but stops on a
+        # rate limit.
         zip_recruiter = self.name == "zip_recruiter"
         if zip_recruiter and not cloudflare.configured():
-            log.info("zip_recruiter skipped: SHIGOTO_BYPARR_URL and SHIGOTO_ZIPRECRUITER_PROXY are required")
+            log.info("zip_recruiter skipped: SHIGOTO_BYPARR_URL and SHIGOTO_PROXY are required")
             return
-        proxied = zip_recruiter or (self.site.use_proxy and proxy_url() is not None)
-        attempts = _PROXY_ATTEMPTS if proxied else 1
+        retrying = zip_recruiter or (self.site.use_proxy and proxy_url() is not None)
+        attempts = _ATTEMPTS if retrying else 1
+        retry_seconds = _ZIP_RECRUITER_RETRY_SECONDS if zip_recruiter else _PROXIED_RETRY_SECONDS
         jobspy_logger.addHandler(detector)
         try:
             for group_index in selected:
@@ -120,8 +129,9 @@ class JobSpySource:
                 complete = True
                 for city in cities:
                     for query in group_queries:
-                        # Union of every attempt's rows: a deep search is ~30 pages on one connection,
-                        # so a proxied attempt often ends early with a 429 but its rows are still real.
+                        # Union of every attempt's rows: a deep search is ~30 pages, so an attempt that
+                        # fails partway still found real rows. LinkedIn retries resume after them, since
+                        # its limit allows only a few pages a minute; ZipRecruiter restarts.
                         found: dict[str, Job] = {}
                         for attempt in range(attempts):
                             detector.failed = detector.blocked = detector.clearance_lost = False
@@ -133,8 +143,10 @@ class JobSpySource:
                                 self.incomplete = True
                                 yield from found.values()
                                 return
+                            offset = 0 if zip_recruiter else len(found)
                             try:
-                                for job in self._search(query, city, hours_old, results_wanted, cleared):
+                                for job in self._search(query, city, hours_old, results_wanted - offset, cleared,
+                                                        offset):
                                     found.setdefault(job.source_id, job)
                             except Exception as error:
                                 detector.failed = True
@@ -154,12 +166,12 @@ class JobSpySource:
                                 break
                             if attempt + 1 < attempts:
                                 log.info("%s %r in %s: retrying", self.name, query, city.name)
-                                time.sleep(_PROXY_RETRY_SECONDS)
+                                time.sleep(retry_seconds)
                         if detector.failed:
                             complete = False
                             self.incomplete = True
-                            if not proxied:
-                                # Direct requests share one IP: drop partial rows, and stop on a block.
+                            if not retrying:
+                                # Drop partial rows, and stop on a block.
                                 log.warning("%s %r in %s skipped; pass incomplete%s", self.name, query, city.name,
                                             " (rate limited, stopping source)" if detector.blocked else "")
                                 if detector.blocked:
@@ -168,6 +180,12 @@ class JobSpySource:
                                 continue
                             log.warning("%s %r in %s incomplete; keeping %d partial results", self.name, query,
                                         city.name, len(found))
+                            # ZipRecruiter already stopped on a rate limit; its 403s are challenges.
+                            if detector.blocked and not zip_recruiter:
+                                log.warning("%s still rate limited after %d attempts; stopping source for this run",
+                                            self.name, attempts)
+                                yield from found.values()
+                                return
                         yield from found.values()
                         time.sleep(self.site.delay_seconds)
                 if not complete:
@@ -179,13 +197,14 @@ class JobSpySource:
             jobspy_logger.removeHandler(detector)
 
     def _search(self, query: str, city: City, hours_old: int | None, results_wanted: int,
-                cleared: cloudflare.Clearance | None = None) -> Iterator[Job]:
+                cleared: cloudflare.Clearance | None = None, offset: int = 0) -> Iterator[Job]:
         with _zip_recruiter_clearance(cleared):
             df = scrape_jobs(
                 site_name=[self.name],
                 search_term=query,
                 location=city.jobspy_location,
                 results_wanted=results_wanted,
+                offset=offset,
                 hours_old=hours_old,
                 country_indeed="Canada",
                 description_format="markdown",

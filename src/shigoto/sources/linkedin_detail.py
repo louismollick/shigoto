@@ -14,15 +14,12 @@ from shigoto.http import PoliteSession, RateLimited, proxy_url
 from shigoto.models import Liveness
 from shigoto.text import html_to_text
 
-# Direct requests share one IP, so a 429 stops LinkedIn for this run instead of hammering it.
-# Through a rotating proxy, closing each connection gives every request (and retry) a new exit IP,
-# so per-IP pacing matters much less. Description fetches add their configured delay on top.
-_session = PoliteSession(min_interval=10, retries=0)
+# Every request shares one IP, proxied or not, so a 429 stops LinkedIn for this run instead of
+# hammering it. Through the static proxy, 10s apart got 429 on a third of requests; 30s apart
+# is the pace LinkedIn's search passed cleanly (see jobspy_source).
+_session = PoliteSession(min_interval=30, retries=0)
 if proxy := proxy_url():
     _session.session.proxies = {"http": proxy, "https": proxy}
-    _session.session.headers["Connection"] = "close"
-    _session.min_interval = 2
-    _session.retries = 2
 
 
 def linkedin_job_id(source_id: str) -> str:

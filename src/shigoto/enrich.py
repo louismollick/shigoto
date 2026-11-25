@@ -1,10 +1,9 @@
 """Fill in missing descriptions one detail page at a time, capped per run.
 
 LinkedIn, ZipRecruiter and Job Bank search results carry no description. Retry missing
-descriptions, capped per source. Direct LinkedIn fetches stop at the first sign of blocking;
-proxied ones skip to the next job. ZipRecruiter requires a Cloudflare clearance and skips failed jobs for later
-retry. It lists one posting under several search keys, so its jobs are grouped by posting and
-each posting is fetched once.
+descriptions, capped per source. LinkedIn fetches stop at the first sign of blocking. ZipRecruiter
+requires a Cloudflare clearance and skips failed jobs for later retry. It lists one posting under
+several search keys, so its jobs are grouped by posting and each posting is fetched once.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ import requests
 
 from shigoto.config import Config
 from shigoto.db import DescriptionTarget, Store, now_iso
-from shigoto.http import RateLimited, RobotsDisallowed, proxy_url
+from shigoto.http import RateLimited, RobotsDisallowed
 from shigoto.sources import cloudflare, jobbank, linkedin_detail, ziprecruiter_detail
 
 log = logging.getLogger(__name__)
@@ -26,14 +25,10 @@ log = logging.getLogger(__name__)
 
 def enrich_descriptions(store: Store, config: Config) -> dict[str, int]:
     d = config.descriptions
-    proxied = proxy_url() is not None
     return {
         "described_linkedin": _enrich(
-            store, "linkedin", d.linkedin_proxied_max_per_run if proxied else d.linkedin_max_per_run,
-            lambda t: linkedin_detail.fetch_description(t.source_id),
-            delay=d.linkedin_proxied_delay_seconds if proxied else d.linkedin_delay_seconds,
-            # Each proxied request has its own exit IP, so one failure says nothing about the next.
-            stop_on_failure=not proxied,
+            store, "linkedin", d.linkedin_max_per_run, lambda t: linkedin_detail.fetch_description(t.source_id),
+            delay=0,  # linkedin_detail's session keeps requests 30s apart
         ),
         "described_jobbank": _enrich(
             store, "jobbank", d.jobbank_max_per_run, lambda t: (jobbank.fetch_description(t.url), ""), delay=0,

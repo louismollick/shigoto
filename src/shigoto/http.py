@@ -28,7 +28,8 @@ BROWSER_UA = (
 
 
 def proxy_url() -> str | None:
-    """Residential proxy for sources that block datacenter IPs (LinkedIn, ZipRecruiter).
+    """Proxy with one fixed residential exit IP, for sources that block datacenter IPs: LinkedIn
+    (JobSpy sites with `use_proxy`, detail and closure fetches) and ZipRecruiter (required).
 
     Set SHIGOTO_PROXY to e.g. `http://user:pass@host:port`; unset means direct requests.
     """

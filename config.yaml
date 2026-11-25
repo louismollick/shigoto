@@ -76,7 +76,7 @@ too_far_locations: [Guelph, Cambridge, Kitchener, Waterloo, Barrie, St. Catharin
 
 # Recency widens after a missed/failed pass. Missing checkpoints trigger a full sweep.
 # LinkedIn rotates focused OR groups, one group across all cities per run, 90s apart; the first
-# city rotates too. LinkedIn uses SHIGOTO_PROXY when set; ZipRecruiter needs SHIGOTO_ZIPRECRUITER_PROXY
+# city rotates too. LinkedIn uses SHIGOTO_PROXY when set; ZipRecruiter needs SHIGOTO_PROXY
 # and SHIGOTO_BYPARR_URL to get past Cloudflare.
 # Indeed searches every term x city, with a weekly full sweep to catch indexing lag.
 jobspy:
@@ -121,7 +121,6 @@ jobbank_enabled: true
 
 descriptions:
   linkedin_max_per_run: 25
-  linkedin_delay_seconds: 10
   jobbank_max_per_run: 60
   ziprecruiter_max_per_run: 50
   ziprecruiter_delay_seconds: 2

@@ -1,10 +1,10 @@
 """Cloudflare clearance for ZipRecruiter, solved by a Byparr browser sidecar.
 
 ZipRecruiter answers nearly every plain request with a Cloudflare challenge, even from residential
-proxies. Byparr solves the challenge once in a real browser through SHIGOTO_ZIPRECRUITER_PROXY, a
-static residential IP; plain curl_cffi requests then reuse its cookies and User-Agent from that same
-IP until Cloudflare challenges again. Every ZipRecruiter request goes through that clearance, so
-without SHIGOTO_BYPARR_URL and SHIGOTO_ZIPRECRUITER_PROXY, ZipRecruiter only gets direct searches.
+proxies. Byparr solves the challenge once in a real browser through SHIGOTO_PROXY, a static
+residential IP; plain curl_cffi requests then reuse its cookies and User-Agent from that same IP
+until Cloudflare challenges again. Every ZipRecruiter request goes through that clearance, so
+without SHIGOTO_BYPARR_URL and SHIGOTO_PROXY, ZipRecruiter sends nothing.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ from urllib.parse import unquote, urlsplit
 
 import requests
 from curl_cffi.requests import Session
+
+from shigoto.http import proxy_url
 
 log = logging.getLogger(__name__)
 
@@ -39,13 +41,8 @@ _current: Clearance | None = None
 _solves_left = MAX_SOLVES
 
 
-def proxy() -> str | None:
-    """Fixed-exit-IP proxy URL (`http://user:pass@host:port`) for every ZipRecruiter request and solve."""
-    return os.environ.get("SHIGOTO_ZIPRECRUITER_PROXY") or None
-
-
 def configured() -> bool:
-    return bool(os.environ.get("SHIGOTO_BYPARR_URL") and proxy())
+    return bool(os.environ.get("SHIGOTO_BYPARR_URL") and proxy_url())
 
 
 def start_run() -> None:
@@ -68,7 +65,7 @@ def clearance() -> Clearance | None:
     solve left in the run's budget failed.
     """
     global _current, _solves_left
-    byparr, static = os.environ.get("SHIGOTO_BYPARR_URL"), proxy()
+    byparr, static = os.environ.get("SHIGOTO_BYPARR_URL"), proxy_url()
     while not _current and byparr and static and _solves_left > 0:
         _solves_left -= 1
         _current = _solve(byparr, static)
