@@ -12,7 +12,7 @@ from shigoto.db import Store
 from shigoto.normalize import CityMatcher
 from shigoto.pipeline import ingest
 from shigoto.sources import build_sources
-from shigoto.sources.jobspy_source import _ATTEMPTS, _BLOCK_RETRY_SECONDS, JobSpySource, row_to_job
+from shigoto.sources.jobspy_source import _ATTEMPTS, _PROXIED_RETRY_SECONDS, JobSpySource, row_to_job
 
 
 @pytest.fixture
@@ -291,7 +291,7 @@ def test_proxied_linkedin_waits_out_rate_limits(store: Store, monkeypatch: pytes
     monkeypatch.setattr("shigoto.sources.jobspy_source.time.sleep", sleeps.append)
     adapter = source(store, JobSpySite(site="linkedin", use_proxy=True, delay_seconds=0))
     jobs = [j.source_id for j in adapter.fetch()]
-    assert sleeps[:_ATTEMPTS - 1] == [_BLOCK_RETRY_SECONDS] * (_ATTEMPTS - 1)
+    assert sleeps[:_ATTEMPTS - 1] == [_PROXIED_RETRY_SECONDS] * (_ATTEMPTS - 1)
     first_term = [f"li-{i}" for i in range(1, _ATTEMPTS + 1)]
     if found:
         # The last try succeeds, so the second term runs too.

@@ -46,7 +46,6 @@ class DescriptionFetch(BaseModel):
     """Per-run caps for fetching missing descriptions one page at a time."""
 
     linkedin_max_per_run: int = 25
-    linkedin_delay_seconds: float = 10.0
     jobbank_max_per_run: int = 60
     ziprecruiter_max_per_run: int = 50
     ziprecruiter_delay_seconds: float = 2.0

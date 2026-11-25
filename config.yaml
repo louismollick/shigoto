@@ -121,7 +121,6 @@ jobbank_enabled: true
 
 descriptions:
   linkedin_max_per_run: 25
-  linkedin_delay_seconds: 10
   jobbank_max_per_run: 60
   ziprecruiter_max_per_run: 50
   ziprecruiter_delay_seconds: 2

@@ -103,7 +103,8 @@ def test_search_uses_clearance_and_resolves_only_after_a_challenge(
         return pd.DataFrame()
 
     monkeypatch.setattr("shigoto.sources.jobspy_source.scrape_jobs", scrape)
-    monkeypatch.setattr("shigoto.sources.jobspy_source.time.sleep", lambda seconds: None)
+    sleeps: list[float] = []
+    monkeypatch.setattr("shigoto.sources.jobspy_source.time.sleep", sleeps.append)
     original = getattr(jobspy.ziprecruiter, "create_session")
     store = Store(tmp_path / "t.db")
     site = JobSpySite(site="zip_recruiter", delay_seconds=0)
@@ -111,6 +112,8 @@ def test_search_uses_clearance_and_resolves_only_after_a_challenge(
     store.close()
     # A challenge or dead proxy re-solves; rate limits and server errors keep the clearance.
     assert len(calls) == searches and byparr.call_count == solves
+    # ZipRecruiter retries, re-solves included, come 5s apart; only proxied LinkedIn waits out 429s.
+    assert [s for s in sleeps if s] == [5] * (searches - 1)
     assert all(c["proxies"] == PROXY for c in calls)
     assert session.cookies.get("cf_clearance", domain=".ziprecruiter.com") == "ok"
     assert session.headers["User-Agent"] == "Firefox/159.0"

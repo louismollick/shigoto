@@ -28,7 +28,7 @@ def enrich_descriptions(store: Store, config: Config) -> dict[str, int]:
     return {
         "described_linkedin": _enrich(
             store, "linkedin", d.linkedin_max_per_run, lambda t: linkedin_detail.fetch_description(t.source_id),
-            delay=d.linkedin_delay_seconds,
+            delay=0,  # linkedin_detail's session keeps requests 30s apart
         ),
         "described_jobbank": _enrich(
             store, "jobbank", d.jobbank_max_per_run, lambda t: (jobbank.fetch_description(t.url), ""), delay=0,

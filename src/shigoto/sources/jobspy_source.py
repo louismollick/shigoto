@@ -33,9 +33,10 @@ _BLOCKED = re.compile(r"\b(403|429|999)\b")
 # down, so both drop it. Rate limits, server errors and parsing failures keep it.
 _CLEARANCE_LOST = re.compile(r"\b403\b|curl: \(\d+\)")
 _ATTEMPTS = 5  # retries ride out transient errors and short rate limits, or get a new clearance
-_RETRY_SECONDS = 5
-# Through the static proxy LinkedIn's occasional 429 clears within a minute (Nov 2026).
-_BLOCK_RETRY_SECONDS = 60
+_ZIP_RECRUITER_RETRY_SECONDS = 5
+# Through the static proxy LinkedIn's occasional 429 clears within a minute (Nov 2026), and any
+# retry restarts at page 1, so it waits longer than the ~30s between pages.
+_PROXIED_RETRY_SECONDS = 60
 
 # LinkedIn rations each IP: through the static proxy, pages 12s apart got 429 every other request,
 # while 30s apart passed 10 of 10 (Nov 2026). JobSpy waits 3-7s between pages by default.
@@ -102,6 +103,7 @@ class JobSpySource:
             return
         retrying = zip_recruiter or (self.site.use_proxy and proxy_url() is not None)
         attempts = _ATTEMPTS if retrying else 1
+        retry_seconds = _ZIP_RECRUITER_RETRY_SECONDS if zip_recruiter else _PROXIED_RETRY_SECONDS
         jobspy_logger.addHandler(detector)
         try:
             for group_index in selected:
@@ -161,7 +163,7 @@ class JobSpySource:
                                 break
                             if attempt + 1 < attempts:
                                 log.info("%s %r in %s: retrying", self.name, query, city.name)
-                                time.sleep(_BLOCK_RETRY_SECONDS if detector.blocked else _RETRY_SECONDS)
+                                time.sleep(retry_seconds)
                         if detector.failed:
                             complete = False
                             self.incomplete = True
@@ -175,7 +177,8 @@ class JobSpySource:
                                 continue
                             log.warning("%s %r in %s incomplete; keeping %d partial results", self.name, query,
                                         city.name, len(found))
-                            if detector.blocked:
+                            # ZipRecruiter already stopped on a rate limit; its 403s are challenges.
+                            if detector.blocked and not zip_recruiter:
                                 log.warning("%s still rate limited after %d attempts; stopping source for this run",
                                             self.name, attempts)
                                 yield from found.values()
