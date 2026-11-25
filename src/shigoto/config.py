@@ -1,6 +1,6 @@
 """Typed app configuration, loaded from config.yaml plus env vars for secrets/paths:
 GOOGLE_APPLICATION_CREDENTIALS, SHIGOTO_SPREADSHEET_ID, SHIGOTO_DB, SHIGOTO_PROXY (see http.proxy_url),
-SHIGOTO_ZIPRECRUITER_PROXY and SHIGOTO_BYPARR_URL (see sources.cloudflare)."""
+and SHIGOTO_BYPARR_URL (see sources.cloudflare)."""
 
 from __future__ import annotations
 
@@ -47,9 +47,6 @@ class DescriptionFetch(BaseModel):
 
     linkedin_max_per_run: int = 25
     linkedin_delay_seconds: float = 10.0
-    # Used instead when SHIGOTO_PROXY is set: each request gets a fresh IP.
-    linkedin_proxied_max_per_run: int = 100
-    linkedin_proxied_delay_seconds: float = 2.0
     jobbank_max_per_run: int = 60
     ziprecruiter_max_per_run: int = 50
     ziprecruiter_delay_seconds: float = 2.0

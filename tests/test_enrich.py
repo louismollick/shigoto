@@ -159,7 +159,7 @@ def test_linkedin_salary_fills_empty_salary_only(store: Store) -> None:
     assert rows[known]['salary'] == '$60,000'
 
 
-def test_proxied_linkedin_failure_skips_to_next_job(store: Store) -> None:
+def test_failure_skips_to_next_job_without_stop_on_failure(store: Store) -> None:
     first = add_job(store, 'linkedin', 'first')
     second = add_job(store, 'linkedin', 'second')
 
@@ -269,7 +269,7 @@ def test_ziprecruiter_failure_continues(store: Store, monkeypatch: MonkeyPatch, 
 
 def test_ziprecruiter_without_proxy(store: Store, monkeypatch: MonkeyPatch) -> None:
     add_job(store, 'zip_recruiter', 'pending')
-    monkeypatch.delenv('SHIGOTO_ZIPRECRUITER_PROXY', raising=False)
+    monkeypatch.delenv('SHIGOTO_PROXY', raising=False)
     factory = Mock()
     monkeypatch.setattr(ziprecruiter_detail, 'create_session', factory)
     config = Config.model_validate({'search_terms': [], 'cities': [], 'title_keywords': [], 'sheet': {}})

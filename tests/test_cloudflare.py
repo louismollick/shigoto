@@ -32,7 +32,7 @@ def solved(cookies: dict[str, str] | None = None, status: int = 200) -> Mock:
 
 @pytest.fixture
 def byparr(monkeypatch: MonkeyPatch) -> Iterator[Mock]:
-    monkeypatch.setenv("SHIGOTO_ZIPRECRUITER_PROXY", PROXY)
+    monkeypatch.setenv("SHIGOTO_PROXY", PROXY)
     monkeypatch.setenv("SHIGOTO_BYPARR_URL", "http://byparr:8191")
     monkeypatch.setattr(cloudflare, "_current", None)
     monkeypatch.setattr(cloudflare, "_solves_left", cloudflare.MAX_SOLVES)
@@ -43,7 +43,7 @@ def byparr(monkeypatch: MonkeyPatch) -> Iterator[Mock]:
 
 def test_unconfigured_never_solves(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.delenv("SHIGOTO_BYPARR_URL", raising=False)
-    monkeypatch.setenv("SHIGOTO_ZIPRECRUITER_PROXY", PROXY)
+    monkeypatch.setenv("SHIGOTO_PROXY", PROXY)
     monkeypatch.setattr(cloudflare, "_current", None)
     post = Mock()
     monkeypatch.setattr("shigoto.sources.cloudflare.requests.post", post)
