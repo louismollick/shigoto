@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from shigoto.employer import employer_link, external_apply_url
+from shigoto.employer import employer_link, external_apply_url, requisitions
 from shigoto.models import SourceLink
 
 
@@ -55,3 +55,40 @@ def test_recognized_ats_urls(url: str, expected: SourceLink) -> None:
 ])
 def test_unchecked_urls(url: str) -> None:
     assert employer_link(url) is None
+
+
+@pytest.mark.parametrize("urls", [
+    # Aggregators link one Workday requisition with or without the location, slug and /apply.
+    ["https://chg.wd5.myworkdayjobs.com/en-US/CAN_External_Career_Site/job/Calgary-AB---Sons-Bakery/Quality-Assurance-Technician_R820542",
+     "https://chg.wd5.myworkdayjobs.com/CAN_External_Career_Site/job/Quality-Assurance-Technician_R820542/apply?utm_source=ziprecruiter"],
+    ["https://element-ext-row.icims.com/jobs/20691/job?utm_source=indeed_integration",
+     "https://element-ext-row.icims.com/jobs/20691/laboratory-technician-i-%28fixed-term%29/job?mode=apply"],
+    # One requisition on two of the employer's own sites matches by company and number.
+    ["https://www.pepsicojobs.com/main/jobs/482460?mode=apply",
+     "https://globalcareers-pepsico.icims.com/jobs/482460/food-safety-%26-quality-coordinator/job"],
+    ["https://boards.greenhouse.io/acme/jobs/7698887003", "https://acme.example/careers?gh_jid=7698887003"],
+])
+def test_requisitions_match_across_link_shapes(urls: list[str]) -> None:
+    first, second = (requisitions(url, "PepsiCo") for url in urls)
+    assert first & second
+
+
+@pytest.mark.parametrize("first,second", [
+    # A reposted Workday requisition gets a suffix: a separate posting.
+    ("https://ubc.wd10.myworkdayjobs.com/x/job/RA_JR26429", "https://ubc.wd10.myworkdayjobs.com/x/job/RA_JR26429-1"),
+    # Dayforce and ADP number jobs per tenant on a shared host.
+    ("https://jobs.dayforcehcm.com/en-CA/wafna/SITE/jobs/5550", "https://jobs.dayforcehcm.com/en-US/other/SITE/jobs/5550"),
+    ("https://workforcenow.adp.com/r.html?cid=a&jobId=590689", "https://workforcenow.adp.com/r.html?cid=b&jobId=590689"),
+    ("https://apply.workable.com/j/D42B350581", "https://apply.workable.com/rentokil-initial/j/5E973C934A/apply"),
+])
+def test_different_requisitions_stay_apart(first: str, second: str) -> None:
+    assert not requisitions(first, "Acme") & requisitions(second, "Other")
+
+
+@pytest.mark.parametrize("url", [
+    "https://ca.indeed.com/viewjob?jk=1", "https://grnh.se/gqezs70k8us", "https://jobs.phsa.ca/job/lab-assistant", "",
+    "https://www.healthcarecan.ca/2026/10/20/combined-laboratory-x-ray-technologist/",
+    "https://acme.wd3.myworkdayjobs.com/en-US/External_Site_2",
+])
+def test_no_requisition_without_an_employer_job_id(url: str) -> None:
+    assert requisitions(url, "Acme") == set()

@@ -577,3 +577,56 @@ def test_part_time_job_type_is_excluded_and_rejected_table_migrates(tmp_path: Pa
     config = Config(search_terms=[], cities=[City(name="Toronto", jobspy_location="Toronto")],
                     title_keywords=["QA"], sheet=SheetConfig())
     assert store.reevaluate_exclusions(config, "2026-10-01T12:00:00+00:00") == 1
+
+
+WORKDAY = "https://acme.wd3.myworkdayjobs.com/en-US/Careers/job/Toronto/QA-Technician_R100"
+
+
+def test_same_requisition_merges_even_from_one_source(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(apply_url=WORKDAY), "t1")
+    # ZipRecruiter-style relisting: same source, new id, another company spelling, same requisition.
+    store.upsert(job(source_id="in-2", company="Acme Foods Ltd", apply_url=WORKDAY + "/apply"), "t2")
+    # Same requisition but another title or city is a separate row, like any other posting.
+    store.upsert(job(source_id="in-3", title="QA Lead", apply_url=WORKDAY), "t2")
+    store.upsert(job(source_id="in-4", city="Ottawa", apply_url=WORKDAY), "t2")
+    store.commit()
+    jobs = store.conn.execute("SELECT job_id, count(*) AS n FROM job_sources GROUP BY job_id ORDER BY n DESC").fetchall()
+    assert [row["n"] for row in jobs] == [2, 1, 1]
+
+
+def test_merge_duplicates_keeps_reviewer_work_and_open_status(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(), "2026-10-01T00:00:00+00:00")
+    store.upsert(job(source="zip_recruiter", source_id="zr-1", company="Acme Foods", description="",
+                     salary="$60,000", apply_url=WORKDAY), "2026-10-02T00:00:00+00:00")
+    store.commit()
+    first, applied = (row["job_id"] for row in store.conn.execute("SELECT job_id FROM jobs ORDER BY first_seen"))
+    store.conn.execute("UPDATE jobs SET closed_at='2026-10-03', liveness_checked_at='2026-10-03' WHERE job_id=?",
+                       (first,))
+    store.backup_reviews(["AI Score", "Application Status", "User Notes"], {
+        first: {"AI Score": "70", "Application Status": "Not Applied", "User Notes": "Older note"},
+        applied: {"AI Score": "90", "Application Status": "Applied", "User Notes": "Sent CV"}}, "t")
+    store.conn.execute("INSERT INTO ai_results VALUES (?, 'f', 'p', '{}', '{}', NULL, NULL)", (first,))
+    # Indeed's closure check backfills the apply URL that proves both rows are one requisition.
+    store.conn.execute("UPDATE job_sources SET apply_url=? WHERE source='indeed'", (WORKDAY,))
+
+    assert store.merge_duplicates("2026-10-04T00:00:00+00:00") == 1
+    assert store.merge_duplicates("2026-10-04T00:00:00+00:00") == 0
+    [kept] = store.visible_jobs()
+    assert kept.job_id == applied and kept.status == "" and kept.first_seen == "2026-10-01T00:00:00+00:00"
+    assert kept.description == "Test food." and kept.salary == "$60,000" and "indeed" in kept.sources
+    assert store.reviews() == {applied: {"AI Score": "90", "Application Status": "Applied",
+                                         "User Notes": "Sent CV\nOlder note"}}
+    assert store.conn.execute("SELECT count(*) FROM ai_results").fetchone()[0] == 0
+
+
+def test_employer_closure_survives_merge(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(apply_url=WORKDAY), "t1")
+    store.upsert(job(source="linkedin", source_id="li-1", company="Other spelling"), "t1")
+    store.commit()
+    store.conn.execute("UPDATE jobs SET closed_at='t2', closed_by_employer=1 WHERE company='Acme'")
+    store.conn.execute("UPDATE job_sources SET apply_url=? WHERE source='linkedin'", (WORKDAY,))
+    assert store.merge_duplicates("t3") == 1
+    assert [j.status for j in store.visible_jobs()] == ["Closed"]

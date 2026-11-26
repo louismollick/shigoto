@@ -10,6 +10,10 @@ Finds lab and food QA jobs for one candidate and ranks them by how worth applyin
 One real opening, possibly seen on several sources and merged into a single row.
 _Avoid_: Posting, listing, row
 
+**Requisition**:
+The employer's own ID for an opening, read from its posting URL. Postings with the same requisition, title and Target Metro are one Job.
+_Avoid_: Req, posting ID
+
 **Excluded**:
 A job hidden because it no longer passes the city or title filters; kept for its reviews.
 _Avoid_: Filtered, deleted

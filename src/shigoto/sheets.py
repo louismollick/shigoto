@@ -103,6 +103,8 @@ def sync(store: Store, ws: gspread.Worksheet, config: Config) -> dict[str, int]:
         unknown = store.backup_reviews(columns, reviews, now_iso())
         if unknown:
             log.warning("backed up reviews for %d sheet jobs absent from SQLite; these rows will be removed", unknown)
+    # Only after the backup: merging moves reviewer values the sheet could otherwise overwrite.
+    merged = store.merge_duplicates(now_iso())
     hidden = store.reevaluate_exclusions(config, now_iso())
     jobs = store.visible_jobs()
     backed_up = store.reviews()
@@ -134,8 +136,10 @@ def sync(store: Store, ws: gspread.Worksheet, config: Config) -> dict[str, int]:
                 )
     ws.resize(rows=row_count, cols=col_count)
     store.finish_sheet_rebuild()
-    log.info("sheet rebuild: %d rows, %d hidden, %d reviews backed up", len(jobs), hidden, len(reviews))
-    return {"sheet_rows": len(jobs), "sheet_hidden": hidden, "reviews_backed_up": len(reviews)}
+    log.info("sheet rebuild: %d rows, %d hidden, %d reviews backed up, %d duplicates merged",
+             len(jobs), hidden, len(reviews), merged)
+    return {"sheet_rows": len(jobs), "sheet_hidden": hidden, "reviews_backed_up": len(reviews),
+            **({"jobs_merged": merged} if merged else {})}
 
 
 def sync_status(store: Store, ws: gspread.Worksheet) -> int:
