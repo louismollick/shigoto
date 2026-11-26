@@ -141,9 +141,8 @@ def requisition(url: str) -> str | None:
 
 
 def conflicts(keys: set[str], others: set[str]) -> bool:
-    """Whether merging would add a second requisition in one ATS tenant: two openings, never one job.
-    A row that already holds two ids in a tenant can still take postings with ids it holds."""
-    def scopes(group: set[str]) -> set[str]:
-        return {key.rsplit("|", 1)[0] for key in group} - _NO_VETO_SCOPES
-
-    return bool(scopes(keys - others) & scopes(others - keys))
+    """Whether together they name two requisitions in one ATS tenant: two openings, never one job.
+    A legacy row already holding two such ids conflicts with everything, so it can't chain others."""
+    scopes: dict[str, str] = {}
+    return any(scopes.setdefault(scope, key) != key for key in sorted(keys | others)
+               if (scope := key.rsplit("|", 1)[0]) not in _NO_VETO_SCOPES)

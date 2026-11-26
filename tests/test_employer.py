@@ -118,8 +118,7 @@ def test_conflicts_only_within_one_tenant() -> None:
     assert conflicts({"workday:acme|r1"}, {"workday:acme|r2"})
     assert not conflicts({"workday:acme|r1"}, {"workday:acme|r1", "jobvite|x"})
     assert not conflicts({"workday:acme|r1"}, {"workday:other|r2"})
-    # A row already holding two ids can take postings with ids it holds, not a third.
-    assert not conflicts({"workday:acme|r1", "workday:acme|r2"}, {"workday:acme|r2"})
-    assert conflicts({"workday:acme|r1", "workday:acme|r2"}, {"workday:acme|r3"})
+    # A legacy row already holding two ids takes nothing, so it can't chain two openings together.
+    assert conflicts({"workday:acme|r1", "workday:acme|r2"}, {"workday:acme|r2"})
     # SmartRecruiters gives job boards their own id for a posting: never a veto.
     assert not conflicts({"jobs.smartrecruiters.com|149"}, {"jobs.smartrecruiters.com|744000153263178"})

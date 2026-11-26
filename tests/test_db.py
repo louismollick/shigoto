@@ -688,17 +688,20 @@ def test_explicit_applied_beats_skip_with_a_date_and_notes_follow_the_keeper(tmp
     assert reviews[other]["AI Notes"] == f"Duplicate of {applied}. Fits."
 
 
-def test_row_holding_two_requisitions_takes_no_third(tmp_path: Path) -> None:
+def test_row_holding_two_requisitions_cannot_chain_two_openings(tmp_path: Path) -> None:
     store = Store(tmp_path / "t.db")
     r2 = WORKDAY.replace("R100", "R200")
     store.upsert(job(apply_url=WORKDAY), "t1")
-    store.upsert(job(source="indeed", source_id="in-2", company="Acme Two", apply_url=WORKDAY.replace("R100", "R300")), "t1")
+    store.upsert(job(source="indeed", source_id="in-2", company="Acme Two", apply_url=r2), "t1")
+    store.upsert(job(source="indeed", source_id="in-3", company="Acme Three"), "t1")
     store.upsert(job(source="zip_recruiter", source_id="zr-1"), "t1")
     store.commit()
-    # Legacy data: the old name match put ZipRecruiter's R200 posting on Indeed's R100 job.
+    # Legacy data: the old name match put ZipRecruiter's R200 posting on Indeed's R100 job, and
+    # Acme Three's link to R100 arrived later. R100 and R200 must not chain into one row.
     store.conn.execute("UPDATE job_sources SET apply_url=? WHERE source='zip_recruiter'", (r2,))
+    store.conn.execute("UPDATE job_sources SET apply_url=? WHERE source_id='in-3'", (WORKDAY,))
     assert store.merge_duplicates("t2") == 0
-    assert len(store.visible_jobs()) == 2
+    assert len(store.visible_jobs()) == 3
 
 
 def test_smartrecruiters_board_ids_do_not_split_one_opening(tmp_path: Path) -> None:
