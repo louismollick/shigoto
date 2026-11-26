@@ -459,3 +459,18 @@ def test_sync_status_writes_only_changed_status_cells(tmp_path: Path) -> None:
     assert ws.writes == []
     store.conn.execute("INSERT INTO meta (key, value) VALUES ('sheet_rebuild_pending', '1')")
     assert sync_status(store, fake) == 0
+
+
+def test_sync_merges_duplicates_after_backing_up_both_sheet_rows(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    url = "https://acme.wd3.myworkdayjobs.com/Careers/job/QA-Technician_R7"
+    store.upsert(posting("a"), "2026-10-01")
+    store.upsert(Job(source="zip_recruiter", source_id="zr-1", url="https://zip/1", title="QA Technician",
+                     company="Acme Foods", location="Toronto", city="Toronto", apply_url=url), "2026-10-02")
+    store.commit()
+    first, second = (j.job_id for j in store.visible_jobs())
+    store.conn.execute("UPDATE job_sources SET apply_url=? WHERE source='indeed'", (url,))
+    ws = FakeWorksheet([APP_COLUMNS + ["Application Status"], [first] + [""] * 13 + ["Not Applied"],
+                        [second] + [""] * 13 + ["Applied"]])
+    assert rebuild(store, ws, config_for(tmp_path / "t.db"))["jobs_merged"] == 1
+    assert [row[0] for row in ws.rows[1:]] == [second] and ws.rows[1][-1] == "Applied"

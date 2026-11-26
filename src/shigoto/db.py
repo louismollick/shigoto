@@ -1,8 +1,9 @@
 """SQLite store: the authoritative job history.
 
 `jobs` holds one row per deduplicated job; `job_sources` maps every (source, source_id)
-we've seen to its job. Postings only merge across sources: two ids from the same source
-are always two jobs, even with identical company/title/city. A job's fields come from its primary (first) source; other
+we've seen to its job. Postings with the same employer requisition, title and city are one job,
+even from the same source. Otherwise postings only merge across sources: two ids from the same source
+are two jobs, even with identical company/title/city. A job's fields come from its primary (first) source; other
 sources only fill blanks, so the content hash doesn't flip-flop between sources.
 `content_hash` tracks edits to every field used for job-fit review. Reviewer data is backed up before
 each sheet rebuild; excluded jobs and their reviews remain here as history.
@@ -12,17 +13,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
 from shigoto.config import Config
-from shigoto.employer import employer_link, external_apply_url
+from shigoto.employer import conflicts, employer_link, external_apply_url, requisition
 from shigoto.models import Job, Liveness, SourceLink, job_json
-from shigoto.normalize import (RejectionReason, dedupe_key, part_time_only, title_excluded, title_matches,
-                               too_far)
+from shigoto.normalize import (RejectionReason, dedupe_key, norm_title, part_time_only, title_excluded,
+                               title_matches, too_far)
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -163,6 +168,42 @@ def content_hash(title: str, description: str, *, company: str = "", city: str =
     return hashlib.sha1(json.dumps([title, description, company, city, location, salary, job_type]).encode()).hexdigest()
 
 
+def source_requisitions(source: str, url: str, apply_url: str | None) -> set[str]:
+    """Requisitions of one source link: its apply URL, plus its own URL on a full listing."""
+    urls = [apply_url or "", url] if source in FULL_LISTING_SOURCES else [apply_url or ""]
+    return {key for link in urls if (key := requisition(link))}
+
+
+def application_rank(review: dict[str, str]) -> int:
+    """Lower is more of the reviewer's work to keep when merging: Applied, an Applied At date,
+    Skip, other edits, none."""
+    status = review.get("Application Status", "").strip().casefold()
+    if status == "applied":
+        return 0
+    if review.get("Applied At", "").strip():
+        return 1
+    if status == "skip":
+        return 2
+    edited = any(value.strip() for name, value in review.items()
+                 if not name.startswith("AI ") and name != "Application Status")
+    return 3 if edited else 4
+
+
+def merge_reviews(keeper: dict[str, str], other: dict[str, str]) -> dict[str, str]:
+    """The keeper's reviewer values, with blanks filled from the duplicate and both notes kept.
+    AI values stay the keeper's: they judged its posting."""
+    merged = dict(keeper)
+    for name, value in other.items():
+        mine = merged.get(name, "").strip()
+        if name.startswith("AI ") or not value.strip() or mine == value.strip():
+            continue
+        if not mine or (name == "Application Status" and mine.casefold() == "not applied"):
+            merged[name] = value
+        elif name == "User Notes":
+            merged[name] = f"{merged[name]}\n{value}"
+    return merged
+
+
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -201,6 +242,8 @@ def best_url(job_url: str, links: list[sqlite3.Row]) -> str:
 class Store:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Requisition key -> job IDs, built on first use and kept current by upsert.
+        self._requisitions: dict[str, set[str]] | None = None
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
@@ -250,15 +293,19 @@ class Store:
         c = self.conn
         mapped = c.execute("SELECT job_id FROM job_sources WHERE source=? AND source_id=?",
                            (job.source, job.source_id)).fetchone()
-        job_id: str = mapped["job_id"] if mapped else make_job_id(job)
+        keys = source_requisitions(job.source, job.url, job.apply_url)
+        same_requisition = None if mapped else self._same_requisition(keys, job.title, job.city)
+        job_id: str = mapped["job_id"] if mapped else same_requisition or make_job_id(job)
         if not mapped:
             rejected = c.execute("SELECT first_seen FROM rejected_postings WHERE source=? AND source_id=?",
                                  (job.source, job.source_id)).fetchone()
             if rejected and first_seen is None:
                 first_seen = rejected["first_seen"]
-        if not mapped and c.execute("SELECT 1 FROM job_sources WHERE job_id=? AND source=?",
-                                    (job_id, job.source)).fetchone():
-            job_id = make_job_id(job, distinct=True)  # same source, different id: a separate posting
+        if not mapped and not same_requisition and (
+                c.execute("SELECT 1 FROM job_sources WHERE job_id=? AND source=?", (job_id, job.source)).fetchone()
+                or conflicts(keys, self._job_requisitions(job_id))):
+            # Same source with a different id, or another requisition in the same ATS: a separate posting.
+            job_id = make_job_id(job, distinct=True)
         c.execute(
             """INSERT INTO job_sources (source, source_id, job_id, url, first_seen, last_seen, raw, apply_url)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -272,6 +319,9 @@ class Store:
              seen and job.source in FULL_LISTING_SOURCES),
         )
         c.execute("DELETE FROM rejected_postings WHERE source=? AND source_id=?", (job.source, job.source_id))
+        if self._requisitions is not None:
+            for key in keys:
+                self._requisitions[key].add(job_id)
         posted = job.posted_date.isoformat() if job.posted_date else None
         row = c.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
         if row is None:
@@ -286,7 +336,11 @@ class Store:
             )
             return "new"
 
-        primary = job.source == row["primary_source"]
+        # One posting of the primary source supplies the fields, even when the source relists it
+        # under new ids, so two listings can't keep overwriting each other's text.
+        primary = job.source == row["primary_source"] and c.execute(
+            "SELECT source_id FROM job_sources WHERE job_id=? AND source=? ORDER BY first_seen, source_id LIMIT 1",
+            (job_id, job.source)).fetchone()["source_id"] == job.source_id
         merged: dict[str, str] = {
             "title": job.title if primary else row["title"],
             "company": (job.company or row["company"]) if primary else row["company"],
@@ -319,6 +373,139 @@ class Store:
 
     def commit(self) -> None:
         self.conn.commit()
+
+    def _job_requisitions(self, job_id: str) -> set[str]:
+        """Requisitions of a stored job's current source links."""
+        return {key for row in self.conn.execute("SELECT source, url, apply_url FROM job_sources WHERE job_id=?",
+                                                 (job_id,))
+                for key in source_requisitions(row["source"], row["url"], row["apply_url"])}
+
+    def _requisition_index(self) -> dict[str, set[str]]:
+        """Requisition -> job IDs, for finding candidates; links can change, so callers recheck them."""
+        if self._requisitions is None:
+            self._requisitions = defaultdict(set)
+            for row in self.conn.execute("SELECT source, url, apply_url, job_id FROM job_sources"):
+                for key in source_requisitions(row["source"], row["url"], row["apply_url"]):
+                    self._requisitions[key].add(row["job_id"])
+        return self._requisitions
+
+    def _same_requisition(self, keys: set[str], title: str, city: str) -> str | None:
+        """The oldest stored job with one of these requisitions, the same title and city, and no
+        other requisition in the same ATS tenant."""
+        if not keys:
+            return None
+        index = self._requisition_index()
+        ids = sorted(set().union(*(index.get(key, set()) for key in keys)))
+        rows = self.conn.execute(f"SELECT job_id, title, city FROM jobs WHERE job_id IN ({','.join('?' * len(ids))})"
+                                 " ORDER BY first_seen, job_id", ids).fetchall()
+        for row in rows:
+            if (norm_title(row["title"]), row["city"]) == (norm_title(title), city):
+                current = self._job_requisitions(row["job_id"])
+                if keys & current and not conflicts(keys, current):
+                    return str(row["job_id"])
+        return None
+
+    def merge_duplicates(self, now: str) -> int:
+        """Fold stored jobs with the same employer requisition, title and city into one; return merges.
+
+        One requisition advertised in several cities stays one job per city, like any other posting,
+        so each city keeps its own row and review. Jobs whose links name different requisitions in
+        the same ATS tenant never merge, even through a third job.
+
+        Runs during sheet sync, after the sheet's reviewer values are backed up and before the
+        rebuild, so no sheet edit is lost. The keeper is the job with the most reviewer work
+        (Applied, then an Applied At date, then Skip, then other edits), else the oldest. It takes
+        every source link, blank fields and reviewer values the duplicate had; its own AI values stay.
+        """
+        self._requisitions = None
+        jobs = {row["job_id"]: row for row in self.conn.execute("SELECT * FROM jobs")}
+        keys: dict[str, set[str]] = defaultdict(set)
+        for row in self.conn.execute("SELECT source, url, apply_url, job_id FROM job_sources"):
+            keys[row["job_id"]] |= source_requisitions(row["source"], row["url"], row["apply_url"])
+        parent = {job_id: job_id for job_id in jobs}
+
+        def root(job_id: str) -> str:
+            while parent[job_id] != job_id:
+                job_id = parent[job_id]
+            return job_id
+
+        for key, ids in sorted(self._requisition_index().items()):
+            alike: defaultdict[tuple[str, str], list[str]] = defaultdict(list)
+            for job_id in sorted(ids):
+                alike[norm_title(jobs[job_id]["title"]), jobs[job_id]["city"]].append(job_id)
+            for same in alike.values():
+                for i, job_id in enumerate(same):
+                    # Join the first compatible earlier job: a conflicting legacy row mustn't block the rest.
+                    for earlier in same[:i]:
+                        first, other = root(earlier), root(job_id)
+                        if first == other:
+                            break
+                        if not conflicts(keys[first], keys[other]):
+                            parent[other] = first
+                            keys[first] |= keys[other]
+                            break
+        groups: defaultdict[str, list[str]] = defaultdict(list)
+        for job_id in jobs:
+            groups[root(job_id)].append(job_id)
+        reviews = self.reviews()
+        merged = 0
+        for members in groups.values():
+            if len(members) < 2:
+                continue
+            members.sort(key=lambda i: (application_rank(reviews.get(i, {})), jobs[i]["first_seen"], i))
+            keeper = members[0]
+            for duplicate in members[1:]:
+                log.info("merging job %s into %s: %s at %s (same requisition)", duplicate, keeper,
+                         jobs[keeper]["title"], jobs[keeper]["company"])
+                self._merge_job(jobs[keeper], jobs[duplicate], reviews, now)
+                jobs[keeper] = self.conn.execute("SELECT * FROM jobs WHERE job_id=?", (keeper,)).fetchone()
+                merged += 1
+        self._requisitions = None
+        self.conn.commit()
+        return merged
+
+    def _merge_job(self, keeper: sqlite3.Row, duplicate: sqlite3.Row, reviews: dict[str, dict[str, str]],
+                   now: str) -> None:
+        """Move `duplicate`'s links and reviewer values onto `keeper`, then delete it."""
+        c, keep_id, drop_id = self.conn, keeper["job_id"], duplicate["job_id"]
+        fields = {name: keeper[name] or duplicate[name] for name in ("description", "salary", "job_type")}
+        h = content_hash(keeper["title"], fields["description"], company=keeper["company"], city=keeper["city"],
+                         location=keeper["location"], salary=fields["salary"], job_type=fields["job_type"])
+        # Open while either posting is: a stale closure can't hide a live posting, and closure checks
+        # (which now see both postings' links) settle the job again.
+        closed = keeper["closed_at"] is not None and duplicate["closed_at"] is not None
+        c.execute(
+            """UPDATE jobs SET description=:description, salary=:salary, job_type=:job_type,
+               posted_date=coalesce(posted_date, :posted), content_hash=:hash,
+               updated_at=CASE WHEN content_hash != :hash THEN :now ELSE updated_at END,
+               first_seen=CASE WHEN julianday(:first_seen) < julianday(first_seen) THEN :first_seen ELSE first_seen END,
+               last_seen=CASE WHEN julianday(:last_seen) > julianday(last_seen) THEN :last_seen ELSE last_seen END,
+               description_checked_at=coalesce(description_checked_at, :checked),
+               closed_at=CASE WHEN :closed THEN closed_at END,
+               closed_by_employer=CASE WHEN :closed THEN max(closed_by_employer, :by_employer) ELSE 0 END,
+               liveness_checked_at=CASE WHEN :closed OR closed_at IS NULL THEN liveness_checked_at END,
+               liveness_alive_streak=CASE WHEN :closed OR closed_at IS NULL THEN liveness_alive_streak ELSE 0 END
+               WHERE job_id=:job_id""",
+            {**fields, "posted": duplicate["posted_date"], "hash": h, "now": now,
+             "first_seen": duplicate["first_seen"], "last_seen": duplicate["last_seen"],
+             "checked": duplicate["description_checked_at"], "closed": closed,
+             "by_employer": duplicate["closed_by_employer"], "job_id": keep_id},
+        )
+        c.execute("UPDATE job_sources SET job_id=? WHERE job_id=?", (keep_id, drop_id))
+        if drop_id in reviews:
+            reviews[keep_id] = merge_reviews(reviews.get(keep_id, {}), reviews.pop(drop_id))
+            c.execute("""INSERT INTO reviews (job_id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT (job_id)
+                         DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at""",
+                      (keep_id, json.dumps(reviews[keep_id]), now))
+        # AI notes naming the deleted job as canonical now mean the kept one, which is that posting.
+        stale = f"Duplicate of {drop_id}. "
+        for job_id, review in reviews.items():
+            if review.get("AI Notes", "").startswith(stale):
+                prefix = "" if job_id == keep_id else f"Duplicate of {keep_id}. "
+                review["AI Notes"] = prefix + review["AI Notes"].removeprefix(stale)
+                c.execute("UPDATE reviews SET data=? WHERE job_id=?", (json.dumps(review), job_id))
+        for table in ("reviews", "ai_results", "jobs"):
+            c.execute(f"DELETE FROM {table} WHERE job_id=?", (drop_id,))
 
     def get_meta(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()

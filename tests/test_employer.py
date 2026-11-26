@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from shigoto.employer import employer_link, external_apply_url
+from shigoto.employer import conflicts, employer_link, external_apply_url, requisition
 from shigoto.models import SourceLink
 
 
@@ -55,3 +55,70 @@ def test_recognized_ats_urls(url: str, expected: SourceLink) -> None:
 ])
 def test_unchecked_urls(url: str) -> None:
     assert employer_link(url) is None
+
+
+
+@pytest.mark.parametrize("urls", [
+    # Aggregators link one Workday requisition with or without the location, slug and /apply.
+    ["https://chg.wd5.myworkdayjobs.com/en-US/CAN_External_Career_Site/job/Calgary-AB---Sons-Bakery/Quality-Assurance-Technician_R820542",
+     "https://chg.wd5.myworkdayjobs.com/CAN_External_Career_Site/job/Quality-Assurance-Technician_R820542/apply?utm_source=ziprecruiter"],
+    ["https://southlake.wd3.myworkdayjobs.com/en-US/Careers/job/Newmarket/Lab-Tech_JR-102075",
+     "https://southlake.wd3.myworkdayjobs.com/Careers/job/Lab-Tech_JR-102075/apply"],
+    ["https://element-ext-row.icims.com/jobs/20691/job?utm_source=indeed_integration",
+     "https://element-ext-row.icims.com/jobs/20691/laboratory-technician-i-%28fixed-term%29/job?mode=apply"],
+    ["https://boards.greenhouse.io/acme/jobs/7698887003", "https://acme.example/careers?gh_jid=7698887003"],
+    ["https://jobs.dayforcehcm.com/en-CA/wafna/CANCAREERSITE/jobs/5550", "https://jobs.dayforcehcm.com/en-US/wafna/X/jobs/5550"],
+    ["https://emit.fa.ca3.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_2001/requisitions/preview/97828",
+     "https://emit.fa.ca3.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1005/job/97828?utm_source=ziprecruiter"],
+    ["https://careers.cargill.com/en/job/-/-/23251/102816420032",
+     "https://careers.cargill.com/en/job/brampton/food-safety-technician/23251/102816420032?feedId=244200"],
+    ["https://x.fa.ca2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX/job/12345/apply/section/1",
+     "https://x.fa.ca2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX/job/12345"],
+    ["https://careers.opentext.com/us/en/job/53990", "https://careers.opentext.com/us/en/job/53990?utm_source=ziprecruiter"],
+    ["https://indeed.njoyn.com/cl4/xweb/XWeb.asp?page=jobdetails&clid=74950&JobID=J0325-0598&BRID=413047",
+     "https://indeed.njoyn.com/cl4/xweb/XWeb.asp?page=jobdetails&clid=74950&JobID=J0325-0598&BRID=413047&lang=1"],
+    ["https://careers.blood.ca/job/Calgary-Validation-Associate-AB-T3N-1S5/607435017/?utm_source=ZipRecruiter",
+     "https://careers.blood.ca/job/Calgary-Validation-Associate/607435017/"],
+])
+def test_requisition_matches_across_link_shapes(urls: list[str]) -> None:
+    first, second = (requisition(url) for url in urls)
+    assert first is not None and first == second
+
+
+@pytest.mark.parametrize("first,second", [
+    # A reposted Workday requisition gets a suffix: a separate posting.
+    ("https://ubc.wd10.myworkdayjobs.com/x/job/RA_JR26429", "https://ubc.wd10.myworkdayjobs.com/x/job/RA_JR26429-1"),
+    # Dayforce and ADP number jobs per tenant.
+    ("https://jobs.dayforcehcm.com/en-CA/wafna/SITE/jobs/5550", "https://jobs.dayforcehcm.com/en-US/other/SITE/jobs/5550"),
+    ("https://workforcenow.adp.com/r.html?cid=a&jobId=590689", "https://workforcenow.adp.com/r.html?cid=b&jobId=590689"),
+    ("https://apply.workable.com/j/D42B350581", "https://apply.workable.com/rentokil-initial/j/5E973C934A/apply"),
+    # Two UKG postings on one board share the board UUID, not the opportunity.
+    ("https://recruiting.ultipro.com/REF1/JobBoard/9dc59b6d-6dab-454e-883b-4c8c6d36d52d/OpportunityDetail?opportunityId=5e6f940b-1c16-44fe-b872-3826aced90ed",
+     "https://recruiting.ultipro.com/REF1/JobBoard/9dc59b6d-6dab-454e-883b-4c8c6d36d52d/OpportunityDetail?opportunityId=c245bd57-51e4-42ef-b7fb-26a18d6d4070"),
+])
+def test_different_requisitions_stay_apart(first: str, second: str) -> None:
+    assert requisition(first) != requisition(second)
+
+
+@pytest.mark.parametrize("url", [
+    "https://ca.indeed.com/viewjob?jk=1", "https://grnh.se/gqezs70k8us", "https://jobs.phsa.ca/job/lab-assistant", "",
+    "https://www.healthcarecan.ca/2026/10/20/combined-laboratory-x-ray-technologist/",
+    "https://acme.wd3.myworkdayjobs.com/en-US/External_Site_2",
+    "https://recruiting.ultipro.com/REF1/JobBoard/9dc59b6d-6dab-454e-883b-4c8c6d36d52d/OpportunityDetail?postingId=1",
+    "https://careers.example.com/jobs/category/2026/123",
+    "https://acme.icims.com/jobs/search?ss=1", "https://acme.bamboohr.com/careers/list",
+    "https://acme.applytojob.com/apply/jobs", "https://wd1.myworkdaysite.com/en-US/CAN/job/QA_R12345",
+    "https://jobs.dayforcehcm.com/CANDIDATEPORTAL/jobs/5550",
+])
+def test_no_requisition_without_a_known_job_link(url: str) -> None:
+    assert requisition(url) is None
+
+
+def test_conflicts_only_within_one_tenant() -> None:
+    assert conflicts({"workday:acme|r1"}, {"workday:acme|r2"})
+    assert not conflicts({"workday:acme|r1"}, {"workday:acme|r1", "jobvite|x"})
+    assert not conflicts({"workday:acme|r1"}, {"workday:other|r2"})
+    # A legacy row already holding two ids takes nothing, so it can't chain two openings together.
+    assert conflicts({"workday:acme|r1", "workday:acme|r2"}, {"workday:acme|r2"})
+    # SmartRecruiters gives job boards their own id for a posting: never a veto.
+    assert not conflicts({"jobs.smartrecruiters.com|149"}, {"jobs.smartrecruiters.com|744000153263178"})

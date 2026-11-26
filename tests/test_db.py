@@ -577,3 +577,142 @@ def test_part_time_job_type_is_excluded_and_rejected_table_migrates(tmp_path: Pa
     config = Config(search_terms=[], cities=[City(name="Toronto", jobspy_location="Toronto")],
                     title_keywords=["QA"], sheet=SheetConfig())
     assert store.reevaluate_exclusions(config, "2026-10-01T12:00:00+00:00") == 1
+
+
+WORKDAY = "https://acme.wd3.myworkdayjobs.com/en-US/Careers/job/Toronto/QA-Technician_R100"
+
+
+def test_same_requisition_merges_even_from_one_source(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(apply_url=WORKDAY), "t1")
+    # ZipRecruiter-style relisting: same source, new id, another company spelling, same requisition.
+    store.upsert(job(source_id="in-2", company="Acme Foods Ltd", apply_url=WORKDAY + "/apply"), "t2")
+    # Same requisition but another title or city is a separate row, like any other posting.
+    store.upsert(job(source_id="in-3", title="QA Lead", apply_url=WORKDAY), "t2")
+    store.upsert(job(source_id="in-4", city="Ottawa", apply_url=WORKDAY), "t2")
+    store.commit()
+    jobs = store.conn.execute("SELECT job_id, count(*) AS n FROM job_sources GROUP BY job_id ORDER BY n DESC").fetchall()
+    assert [row["n"] for row in jobs] == [2, 1, 1]
+
+
+def test_merge_duplicates_keeps_reviewer_work_and_open_status(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(), "2026-10-01T00:00:00+00:00")
+    store.upsert(job(source="zip_recruiter", source_id="zr-1", company="Acme Foods", description="",
+                     salary="$60,000", apply_url=WORKDAY), "2026-10-02T00:00:00+00:00")
+    store.commit()
+    first, applied = (row["job_id"] for row in store.conn.execute("SELECT job_id FROM jobs ORDER BY first_seen"))
+    store.conn.execute("UPDATE jobs SET closed_at='2026-10-03', liveness_checked_at='2026-10-03' WHERE job_id=?",
+                       (first,))
+    store.backup_reviews(["AI Score", "Application Status", "User Notes"], {
+        first: {"AI Score": "70", "Application Status": "Not Applied", "User Notes": "Older note"},
+        applied: {"AI Score": "90", "Application Status": "Applied", "User Notes": "Sent CV"}}, "t")
+    store.conn.execute("INSERT INTO ai_results VALUES (?, 'f', 'p', '{}', '{}', NULL, NULL)", (first,))
+    # Indeed's closure check backfills the apply URL that proves both rows are one requisition.
+    store.conn.execute("UPDATE job_sources SET apply_url=? WHERE source='indeed'", (WORKDAY,))
+
+    assert store.merge_duplicates("2026-10-04T00:00:00+00:00") == 1
+    assert store.merge_duplicates("2026-10-04T00:00:00+00:00") == 0
+    [kept] = store.visible_jobs()
+    assert kept.job_id == applied and kept.status == "" and kept.first_seen == "2026-10-01T00:00:00+00:00"
+    assert kept.description == "Test food." and kept.salary == "$60,000" and "indeed" in kept.sources
+    assert store.reviews() == {applied: {"AI Score": "90", "Application Status": "Applied",
+                                         "User Notes": "Sent CV\nOlder note"}}
+    assert store.conn.execute("SELECT count(*) FROM ai_results").fetchone()[0] == 0
+
+
+
+def test_merged_job_stays_open_while_either_posting_is(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(apply_url=WORKDAY), "2026-10-01T00:00:00+00:00")
+    store.upsert(job(source="linkedin", source_id="li-1", company="Other spelling"), "2026-10-01T00:00:00+00:00")
+    store.commit()
+    store.conn.execute("UPDATE jobs SET closed_at='2026-10-02', closed_by_employer=1, liveness_alive_streak=3 "
+                       "WHERE company='Acme'")
+    store.conn.execute("UPDATE job_sources SET apply_url=? WHERE source='linkedin'", (WORKDAY,))
+    assert store.merge_duplicates("2026-10-03T00:00:00+00:00") == 1
+    [kept] = store.visible_jobs()
+    row = store.conn.execute("SELECT * FROM jobs").fetchone()
+    assert kept.status == "" and row["closed_by_employer"] == 0 and row["liveness_alive_streak"] == 0
+
+
+def test_different_requisitions_never_merge_on_company_title_city(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(apply_url=WORKDAY), "t1")
+    store.upsert(job(source="zip_recruiter", source_id="zr-1", apply_url=WORKDAY.replace("R100", "R200")), "t1")
+    # A third posting for R100 joins its own requisition, not the one that only shares a name.
+    store.upsert(job(source="linkedin", source_id="li-1", apply_url=WORKDAY), "t1")
+    store.commit()
+    assert sorted(len(j.sources.splitlines()) for j in store.visible_jobs()) == [1, 2]
+    assert store.merge_duplicates("t2") == 0
+
+
+def test_changed_apply_url_stops_matching_its_old_requisition(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(apply_url=WORKDAY), "t1")
+    store.upsert(job(apply_url=WORKDAY.replace("R100", "R200")), "t2")  # the listing now links elsewhere
+    store.upsert(job(source="zip_recruiter", source_id="zr-1", company="Acme Two", apply_url=WORKDAY), "t3")
+    store.commit()
+    assert len(store.visible_jobs()) == 2
+
+
+def test_relisted_posting_keeps_its_first_text(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(source="zip_recruiter", source_id="zr-1", apply_url=WORKDAY, description="First"), "t1")
+    store.upsert(job(source="zip_recruiter", source_id="zr-2", apply_url=WORKDAY, description="Second"), "t2")
+    assert store.upsert(job(source="zip_recruiter", source_id="zr-2", apply_url=WORKDAY, description="Second"),
+                        "t3") == "seen"
+    store.commit()
+    [only] = store.visible_jobs()
+    assert only.description == "First" and only.updated_at == "t1"
+
+
+def test_explicit_applied_beats_skip_with_a_date_and_notes_follow_the_keeper(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(), "2026-10-01T00:00:00+00:00")
+    store.upsert(job(source="zip_recruiter", source_id="zr-1", company="Acme Two", apply_url=WORKDAY),
+                 "2026-10-02T00:00:00+00:00")
+    store.upsert(job(source="workday", source_id="w-1", company="Acme Three", url="https://x.example/other"),
+                 "2026-10-02T00:00:00+00:00")
+    store.commit()
+    ids = {r["company"]: r["job_id"] for r in store.conn.execute("SELECT job_id, company FROM jobs")}
+    skipped, applied, other = ids["Acme"], ids["Acme Two"], ids["Acme Three"]
+    store.backup_reviews(["Application Status", "Applied At", "AI Notes"], {
+        skipped: {"Application Status": "Skip", "Applied At": "2026-10-03", "AI Notes": "Fits."},
+        applied: {"Application Status": "Applied", "Applied At": "", "AI Notes": f"Duplicate of {skipped}. Fits."},
+        other: {"Application Status": "", "Applied At": "", "AI Notes": f"Duplicate of {skipped}. Fits."}}, "t")
+    store.conn.execute("UPDATE job_sources SET apply_url=? WHERE source='indeed'", (WORKDAY,))
+    assert store.merge_duplicates("2026-10-04T00:00:00+00:00") == 1
+    reviews = store.reviews()
+    assert reviews[applied] == {"Application Status": "Applied", "Applied At": "2026-10-03", "AI Notes": "Fits."}
+    assert reviews[other]["AI Notes"] == f"Duplicate of {applied}. Fits."
+
+
+def test_row_holding_two_requisitions_cannot_chain_two_openings(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    r2 = WORKDAY.replace("R100", "R200")
+    store.upsert(job(apply_url=WORKDAY), "t1")
+    store.upsert(job(source="indeed", source_id="in-2", company="Acme Two", apply_url=r2), "t1")
+    store.upsert(job(source="indeed", source_id="in-3", company="Acme Three"), "t1")
+    store.upsert(job(source="zip_recruiter", source_id="zr-1"), "t1")
+    store.commit()
+    # Legacy data: the old name match put ZipRecruiter's R200 posting on Indeed's R100 job, and
+    # Acme Three's link to R100 arrived later. R100 and R200 must not chain into one row.
+    store.conn.execute("UPDATE job_sources SET apply_url=? WHERE source='zip_recruiter'", (r2,))
+    store.conn.execute("UPDATE job_sources SET apply_url=? WHERE source_id='in-3'", (WORKDAY,))
+    assert store.merge_duplicates("t2") == 0
+    assert len(store.visible_jobs()) == 3
+    # It doesn't block two clean R200 rows from merging with each other either.
+    store.upsert(job(source="indeed", source_id="in-4", company="Acme Four"), "t3")
+    store.conn.execute("UPDATE job_sources SET apply_url=? WHERE source_id='in-4'", (r2,))
+    assert store.merge_duplicates("t4") == 1
+    assert len(store.visible_jobs()) == 3
+
+
+def test_smartrecruiters_board_ids_do_not_split_one_opening(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(source="smartrecruiters", source_id="SGS:149", url="https://jobs.smartrecruiters.com/SGS/149-qa"), "t1")
+    store.upsert(job(source="zip_recruiter", source_id="zr-1",
+                     apply_url="https://jobs.smartrecruiters.com/SGS/744000153263178-qa"), "t2")
+    store.commit()
+    assert len(store.visible_jobs()) == 1
