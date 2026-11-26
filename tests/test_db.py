@@ -688,14 +688,23 @@ def test_explicit_applied_beats_skip_with_a_date_and_notes_follow_the_keeper(tmp
     assert reviews[other]["AI Notes"] == f"Duplicate of {applied}. Fits."
 
 
-def test_row_holding_two_requisitions_absorbs_neither(tmp_path: Path) -> None:
+def test_row_holding_two_requisitions_takes_no_third(tmp_path: Path) -> None:
     store = Store(tmp_path / "t.db")
     r2 = WORKDAY.replace("R100", "R200")
     store.upsert(job(apply_url=WORKDAY), "t1")
-    store.upsert(job(source="indeed", source_id="in-2", company="Acme Two", apply_url=r2), "t1")
+    store.upsert(job(source="indeed", source_id="in-2", company="Acme Two", apply_url=WORKDAY.replace("R100", "R300")), "t1")
     store.upsert(job(source="zip_recruiter", source_id="zr-1"), "t1")
     store.commit()
     # Legacy data: the old name match put ZipRecruiter's R200 posting on Indeed's R100 job.
     store.conn.execute("UPDATE job_sources SET apply_url=? WHERE source='zip_recruiter'", (r2,))
     assert store.merge_duplicates("t2") == 0
     assert len(store.visible_jobs()) == 2
+
+
+def test_smartrecruiters_board_ids_do_not_split_one_opening(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    store.upsert(job(source="smartrecruiters", source_id="SGS:149", url="https://jobs.smartrecruiters.com/SGS/149-qa"), "t1")
+    store.upsert(job(source="zip_recruiter", source_id="zr-1",
+                     apply_url="https://jobs.smartrecruiters.com/SGS/744000153263178-qa"), "t2")
+    store.commit()
+    assert len(store.visible_jobs()) == 1

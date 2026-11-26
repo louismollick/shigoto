@@ -52,10 +52,14 @@ def employer_link(apply_url: str) -> SourceLink | None:
 
 
 
-_WORKDAY_ID = re.compile(r".+_([a-z]*-?\d[\w-]*)", re.I)  # Quality-Assurance-Technician_R820542, _JR-102075
+_WORKDAY_ID = re.compile(r".+?_([a-z]*-?\d[\w-]*)", re.I)  # Quality-Assurance-Technician_R820542, _JR-102075
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 _YEARLESS_NUMBER = re.compile(r"(?!(?:19|20)\d\d$)\d{4,}")
 _LEADING_ID = re.compile(r"(\d{3,}|[0-9a-f]{12,})(?:-.*)?", re.I)  # SmartRecruiters, Breezy: <id>-<slug>
+_LOCALE = re.compile(r"[a-z]{2}(?:-[a-z]{2})?", re.I)
+# SmartRecruiters gives job boards their own id for a posting, so its ids prove a match but
+# never prove two openings.
+_NO_VETO_SCOPES = frozenset({"jobs.smartrecruiters.com"})
 
 
 def _after(segments: list[str], marker: str) -> str:
@@ -63,13 +67,23 @@ def _after(segments: list[str], marker: str) -> str:
     return segments[segments.index(marker) + 1] if marker in segments[:-1] else ""
 
 
+def _number(value: str) -> str:
+    return value if value.isdigit() else ""
+
+
+def _code(value: str) -> str:
+    """A short-link job code like Workable's D42B350581 or Jobvite's oGppAfwO, not a word like "search"."""
+    return value if len(value) >= 7 and re.fullmatch(r"\w+", value) and re.search(r"[\dA-Z]", value) else ""
+
+
 def requisition(url: str) -> str | None:
     """`scope|id` naming the employer requisition behind an employer page, or None.
 
-    Postings that share it, a title and a city are one opening. Only known ATS link shapes count:
-    a generic guess can mistake a board or category number for a job. The scope includes the
-    tenant wherever ids are only unique per employer. Slugs, locales, /apply suffixes and
-    tracking parameters are ignored, since aggregators link one requisition each of those ways.
+    Postings that share it, a title and a city are one opening. Only known ATS link shapes,
+    with ids of the shape that ATS uses, count: a generic guess can mistake a board, category or
+    search page for a job. The scope includes the tenant wherever ids are only unique per employer.
+    Slugs, locales, /apply suffixes and tracking parameters are ignored, since aggregators link
+    one requisition each of those ways.
     """
     if not external_apply_url(url):
         return None
@@ -77,41 +91,41 @@ def requisition(url: str) -> str | None:
     parts = urlsplit(url)
     segments = [segment for segment in parts.path.split("/") if segment]
     params = {name.casefold(): value for name, value in parse_qsl(parts.query)}
-    tenant = host.split(".")[0]
     scope, job_id = "", ""
     if host.endswith(".myworkdayjobs.com") or host.endswith(".myworkdaysite.com"):
         # The tenant is in the host, or in /recruiting/<tenant>/ on the shared myworkdaysite.com.
-        scope = "workday:" + (_after(segments, "recruiting") if host.endswith(".myworkdaysite.com") else tenant)
+        tenant = _after(segments, "recruiting") if host.endswith(".myworkdaysite.com") else host.split(".")[0]
         after_job = segments[segments.index("job") + 1:] if "job" in segments else []
+        scope = f"workday:{tenant.casefold()}" if tenant else ""
         job_id = next((m[1] for segment in reversed(after_job) if (m := _WORKDAY_ID.fullmatch(segment))), "")
     elif "gh_jid" in params or host.endswith(".greenhouse.io"):
-        scope, job_id = "greenhouse", params.get("gh_jid") or _after(segments, "jobs")
+        scope, job_id = "greenhouse", _number(params.get("gh_jid") or _after(segments, "jobs"))
     elif host in ("jobs.lever.co", "jobs.ashbyhq.com", "ats.rippling.com"):
         scope, job_id = host, next((s for s in segments if _UUID.fullmatch(s)), "")
     elif host == "jobs.smartrecruiters.com" and len(segments) > 1 and (m := _LEADING_ID.fullmatch(segments[1])):
         scope, job_id = host, m[1]
     elif host.endswith(".icims.com"):
-        scope, job_id = host, _after(segments, "jobs")
-    elif host == "jobs.dayforcehcm.com" and len(segments) > 1:  # /<locale>/<tenant>/<site>/jobs/<id>
-        scope, job_id = f"dayforce:{segments[1].casefold()}", _after(segments, "jobs")
+        scope, job_id = host, _number(_after(segments, "jobs"))
+    elif host == "jobs.dayforcehcm.com" and len(segments) > 1 and _LOCALE.fullmatch(segments[0]):
+        scope, job_id = f"dayforce:{segments[1].casefold()}", _number(_after(segments, "jobs"))  # /<locale>/<tenant>/...
     elif host.endswith(".adp.com") and params.get("cid"):
-        scope, job_id = f"adp:{params['cid']}", params.get("jobid", "")
+        scope, job_id = f"adp:{params['cid']}", _number(params.get("jobid", ""))
     elif host.endswith(".bamboohr.com"):
-        scope, job_id = host, _after(segments, "careers")
+        scope, job_id = host, _number(_after(segments, "careers"))
     elif host.endswith(".oraclecloud.com"):  # One number per host, whatever the site: .../job/<id>, .../preview/<id>
-        scope, job_id = host, segments[-1] if segments[-1:] and segments[-1].isdigit() else ""
+        scope, job_id = host, _number(_after(segments, "preview") or _after(segments, "job"))
     elif host.endswith(".workable.com") or host.endswith(".careerplug.com"):
-        scope, job_id = host, _after(segments, "j")
+        scope, job_id = host, _code(_after(segments, "j"))
     elif host.endswith(".jobvite.com"):
-        scope, job_id = "jobvite", params.get("j") or _after(segments, "job")
+        scope, job_id = "jobvite", _code(params.get("j") or _after(segments, "job"))
     elif host.endswith(".breezy.hr") and (m := _LEADING_ID.fullmatch(_after(segments, "p"))):
         scope, job_id = host, m[1]
     elif host.endswith(".applytojob.com"):
-        scope, job_id = host, _after(segments, "apply")
+        scope, job_id = host, _code(_after(segments, "apply"))
     elif ".ultipro." in host:
-        scope, job_id = host, params.get("opportunityid", "")
+        scope, job_id = host, params.get("opportunityid", "") if _UUID.fullmatch(params.get("opportunityid", "")) else ""
     elif host.endswith(".csod.com"):
-        scope, job_id = host, _after(segments, "requisition")
+        scope, job_id = host, _number(_after(segments, "requisition"))
     elif host.endswith(".njoyn.com") and params.get("clid"):
         scope, job_id = f"njoyn:{params['clid']}", params.get("jobid", "")
     elif "job" in segments and len(segments) > 2 and segments[-1].isdigit() and segments[-2].isdigit():
@@ -120,13 +134,16 @@ def requisition(url: str) -> str | None:
         scope, job_id = host, _after(segments, "job")  # Phenom: /<locale>/job/<id>[/<slug>]
     elif len(segments) == 3 and segments[0] == "job" and segments[2].isdigit() and len(segments[2]) >= 6:
         scope, job_id = host, segments[2]  # SuccessFactors career sites: /job/<slug>/<id>/
-    if not job_id or not re.fullmatch(r"[\w-]+", job_id):
+    if not scope or not job_id or not re.fullmatch(r"[\w-]+", job_id):
         return None
-    return f"{scope}|{job_id.casefold()}"
+    case_sensitive = scope == "jobvite" or host.endswith(".applytojob.com")  # mixed-case short codes
+    return f"{scope}|{job_id if case_sensitive else job_id.casefold()}"
 
 
 def conflicts(keys: set[str], others: set[str]) -> bool:
-    """Whether together they name two requisitions in one ATS tenant: two openings, never one job.
-    A legacy row that already holds two such requisitions conflicts with everything."""
-    scopes: dict[str, str] = {}
-    return any(scopes.setdefault(key.rsplit("|", 1)[0], key) != key for key in sorted(keys | others))
+    """Whether merging would add a second requisition in one ATS tenant: two openings, never one job.
+    A row that already holds two ids in a tenant can still take postings with ids it holds."""
+    def scopes(group: set[str]) -> set[str]:
+        return {key.rsplit("|", 1)[0] for key in group} - _NO_VETO_SCOPES
+
+    return bool(scopes(keys - others) & scopes(others - keys))

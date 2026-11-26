@@ -72,6 +72,8 @@ def test_unchecked_urls(url: str) -> None:
      "https://emit.fa.ca3.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1005/job/97828?utm_source=ziprecruiter"],
     ["https://careers.cargill.com/en/job/-/-/23251/102816420032",
      "https://careers.cargill.com/en/job/brampton/food-safety-technician/23251/102816420032?feedId=244200"],
+    ["https://x.fa.ca2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX/job/12345/apply/section/1",
+     "https://x.fa.ca2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX/job/12345"],
     ["https://careers.opentext.com/us/en/job/53990", "https://careers.opentext.com/us/en/job/53990?utm_source=ziprecruiter"],
     ["https://indeed.njoyn.com/cl4/xweb/XWeb.asp?page=jobdetails&clid=74950&JobID=J0325-0598&BRID=413047",
      "https://indeed.njoyn.com/cl4/xweb/XWeb.asp?page=jobdetails&clid=74950&JobID=J0325-0598&BRID=413047&lang=1"],
@@ -104,6 +106,9 @@ def test_different_requisitions_stay_apart(first: str, second: str) -> None:
     "https://acme.wd3.myworkdayjobs.com/en-US/External_Site_2",
     "https://recruiting.ultipro.com/REF1/JobBoard/9dc59b6d-6dab-454e-883b-4c8c6d36d52d/OpportunityDetail?postingId=1",
     "https://careers.example.com/jobs/category/2026/123",
+    "https://acme.icims.com/jobs/search?ss=1", "https://acme.bamboohr.com/careers/list",
+    "https://acme.applytojob.com/apply/jobs", "https://wd1.myworkdaysite.com/en-US/CAN/job/QA_R12345",
+    "https://jobs.dayforcehcm.com/CANDIDATEPORTAL/jobs/5550",
 ])
 def test_no_requisition_without_a_known_job_link(url: str) -> None:
     assert requisition(url) is None
@@ -113,4 +118,8 @@ def test_conflicts_only_within_one_tenant() -> None:
     assert conflicts({"workday:acme|r1"}, {"workday:acme|r2"})
     assert not conflicts({"workday:acme|r1"}, {"workday:acme|r1", "jobvite|x"})
     assert not conflicts({"workday:acme|r1"}, {"workday:other|r2"})
-    assert conflicts({"workday:acme|r1", "workday:acme|r2"}, {"workday:acme|r2"})
+    # A row already holding two ids can take postings with ids it holds, not a third.
+    assert not conflicts({"workday:acme|r1", "workday:acme|r2"}, {"workday:acme|r2"})
+    assert conflicts({"workday:acme|r1", "workday:acme|r2"}, {"workday:acme|r3"})
+    # SmartRecruiters gives job boards their own id for a posting: never a veto.
+    assert not conflicts({"jobs.smartrecruiters.com|149"}, {"jobs.smartrecruiters.com|744000153263178"})
