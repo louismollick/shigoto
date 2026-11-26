@@ -702,6 +702,11 @@ def test_row_holding_two_requisitions_cannot_chain_two_openings(tmp_path: Path) 
     store.conn.execute("UPDATE job_sources SET apply_url=? WHERE source_id='in-3'", (WORKDAY,))
     assert store.merge_duplicates("t2") == 0
     assert len(store.visible_jobs()) == 3
+    # It doesn't block two clean R200 rows from merging with each other either.
+    store.upsert(job(source="indeed", source_id="in-4", company="Acme Four"), "t3")
+    store.conn.execute("UPDATE job_sources SET apply_url=? WHERE source_id='in-4'", (r2,))
+    assert store.merge_duplicates("t4") == 1
+    assert len(store.visible_jobs()) == 3
 
 
 def test_smartrecruiters_board_ids_do_not_split_one_opening(tmp_path: Path) -> None:

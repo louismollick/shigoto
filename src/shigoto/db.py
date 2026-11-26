@@ -434,11 +434,16 @@ class Store:
             for job_id in sorted(ids):
                 alike[norm_title(jobs[job_id]["title"]), jobs[job_id]["city"]].append(job_id)
             for same in alike.values():
-                for job_id in same[1:]:
-                    first, other = root(same[0]), root(job_id)
-                    if first != other and not conflicts(keys[first], keys[other]):
-                        parent[other] = first
-                        keys[first] |= keys[other]
+                for i, job_id in enumerate(same):
+                    # Join the first compatible earlier job: a conflicting legacy row mustn't block the rest.
+                    for earlier in same[:i]:
+                        first, other = root(earlier), root(job_id)
+                        if first == other:
+                            break
+                        if not conflicts(keys[first], keys[other]):
+                            parent[other] = first
+                            keys[first] |= keys[other]
+                            break
         groups: defaultdict[str, list[str]] = defaultdict(list)
         for job_id in jobs:
             groups[root(job_id)].append(job_id)
