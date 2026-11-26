@@ -113,3 +113,4 @@ def test_conflicts_only_within_one_tenant() -> None:
     assert conflicts({"workday:acme|r1"}, {"workday:acme|r2"})
     assert not conflicts({"workday:acme|r1"}, {"workday:acme|r1", "jobvite|x"})
     assert not conflicts({"workday:acme|r1"}, {"workday:other|r2"})
+    assert conflicts({"workday:acme|r1", "workday:acme|r2"}, {"workday:acme|r2"})

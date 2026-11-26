@@ -126,6 +126,7 @@ def requisition(url: str) -> str | None:
 
 
 def conflicts(keys: set[str], others: set[str]) -> bool:
-    """Whether two sets of requisitions name different jobs in the same ATS tenant."""
-    scopes = {key.rsplit("|", 1)[0]: key for key in keys}
-    return any(scopes.get(key.rsplit("|", 1)[0], key) != key for key in others)
+    """Whether together they name two requisitions in one ATS tenant: two openings, never one job.
+    A legacy row that already holds two such requisitions conflicts with everything."""
+    scopes: dict[str, str] = {}
+    return any(scopes.setdefault(key.rsplit("|", 1)[0], key) != key for key in sorted(keys | others))

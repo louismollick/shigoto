@@ -686,3 +686,16 @@ def test_explicit_applied_beats_skip_with_a_date_and_notes_follow_the_keeper(tmp
     reviews = store.reviews()
     assert reviews[applied] == {"Application Status": "Applied", "Applied At": "2026-10-03", "AI Notes": "Fits."}
     assert reviews[other]["AI Notes"] == f"Duplicate of {applied}. Fits."
+
+
+def test_row_holding_two_requisitions_absorbs_neither(tmp_path: Path) -> None:
+    store = Store(tmp_path / "t.db")
+    r2 = WORKDAY.replace("R100", "R200")
+    store.upsert(job(apply_url=WORKDAY), "t1")
+    store.upsert(job(source="indeed", source_id="in-2", company="Acme Two", apply_url=r2), "t1")
+    store.upsert(job(source="zip_recruiter", source_id="zr-1"), "t1")
+    store.commit()
+    # Legacy data: the old name match put ZipRecruiter's R200 posting on Indeed's R100 job.
+    store.conn.execute("UPDATE job_sources SET apply_url=? WHERE source='zip_recruiter'", (r2,))
+    assert store.merge_duplicates("t2") == 0
+    assert len(store.visible_jobs()) == 2
