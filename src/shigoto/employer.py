@@ -11,7 +11,6 @@ import re
 from urllib.parse import parse_qsl, urlsplit
 
 from shigoto.models import SourceLink
-from shigoto.normalize import norm_company
 
 _AGGREGATORS = (".indeed.com", ".ziprecruiter.com", ".linkedin.com")
 _GREENHOUSE = re.compile(r"/([^/]+)/jobs/(\d+)/?")
@@ -52,56 +51,81 @@ def employer_link(apply_url: str) -> SourceLink | None:
     return None
 
 
-_WORKDAY_ID = re.compile(r".+_([a-z]*\d[\w-]*)", re.I)  # Quality-Assurance-Technician_R820542
-# Job numbers and UUIDs in a path; years are skipped, since blog-style paths start /2026/10/20/<slug>.
-_PATH_ID = re.compile(r"(?!(?:19|20)\d\d$)\d{3,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
-_LEADING_ID = re.compile(r"(\d{5,}|[0-9a-f]{12,})-.*", re.I)  # SmartRecruiters, Breezy: <id>-<slug>
-_ID_PARAMS = ("jobid", "jobopeningid", "opportunityid", "rid", "j")
-_TENANT_PARAMS = ("cid", "clid", "org", "c")  # ADP, Njoyn, Taleo and Cornerstone ids are per tenant
+
+_WORKDAY_ID = re.compile(r".+_([a-z]*-?\d[\w-]*)", re.I)  # Quality-Assurance-Technician_R820542, _JR-102075
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+_YEARLESS_NUMBER = re.compile(r"(?!(?:19|20)\d\d$)\d{4,}")
+_LEADING_ID = re.compile(r"(\d{3,}|[0-9a-f]{12,})(?:-.*)?", re.I)  # SmartRecruiters, Breezy: <id>-<slug>
 
 
-def requisitions(url: str, company: str) -> set[str]:
-    """Keys for the employer requisition behind an employer page: postings that share a key and a
-    title are one opening. Empty for aggregators and pages without a recognizable job id.
+def _after(segments: list[str], marker: str) -> str:
+    """The path segment after `marker`, blank when absent."""
+    return segments[segments.index(marker) + 1] if marker in segments[:-1] else ""
 
-    Keys are host-scoped (`host:id`), since ids from different systems can collide. A numeric id
-    of 5+ digits also yields `company#id`, which matches one requisition shown on two of the
-    employer's sites (pepsicojobs.com and PepsiCo's iCIMS). Slugs are ignored: aggregators link
-    the same requisition with different slugs and /apply suffixes.
+
+def requisition(url: str) -> str | None:
+    """`scope|id` naming the employer requisition behind an employer page, or None.
+
+    Postings that share it, a title and a city are one opening. Only known ATS link shapes count:
+    a generic guess can mistake a board or category number for a job. The scope includes the
+    tenant wherever ids are only unique per employer. Slugs, locales, /apply suffixes and
+    tracking parameters are ignored, since aggregators link one requisition each of those ways.
     """
-    host = url_host(url).removeprefix("www.")
     if not external_apply_url(url):
-        return set()
+        return None
+    host = url_host(url).removeprefix("www.")
     parts = urlsplit(url)
     segments = [segment for segment in parts.path.split("/") if segment]
     params = {name.casefold(): value for name, value in parse_qsl(parts.query)}
-    job_id, scope = "", host
-    if host.endswith((".myworkdayjobs.com", ".myworkdaysite.com")):
-        # Tenant from the host, or from /recruiting/<tenant>/ on the shared myworkdaysite.com.
-        scope = "workday:" + (segments[1] if host.endswith(".myworkdaysite.com") and len(segments) > 1
-                              else host.split(".")[0])
+    tenant = host.split(".")[0]
+    scope, job_id = "", ""
+    if host.endswith(".myworkdayjobs.com") or host.endswith(".myworkdaysite.com"):
+        # The tenant is in the host, or in /recruiting/<tenant>/ on the shared myworkdaysite.com.
+        scope = "workday:" + (_after(segments, "recruiting") if host.endswith(".myworkdaysite.com") else tenant)
         after_job = segments[segments.index("job") + 1:] if "job" in segments else []
         job_id = next((m[1] for segment in reversed(after_job) if (m := _WORKDAY_ID.fullmatch(segment))), "")
-    elif host.endswith(".greenhouse.io") or "gh_jid" in params:
-        scope = "greenhouse"
-        job_id = params.get("gh_jid") or next((s for s in reversed(segments) if s.isdigit()), "")
-    elif name := next((name for name in _ID_PARAMS if params.get(name)), None):
-        scope = ":".join([host, *(params[t] for t in _TENANT_PARAMS if params.get(t))])
-        job_id = params[name]
-    elif "j" in segments[:-1]:  # Workable, CareerPlug: /j/<code>
-        job_id = segments[segments.index("j") + 1]
-    elif host.endswith(".applytojob.com") and "apply" in segments[:-1]:
-        job_id = segments[segments.index("apply") + 1]
-    else:
-        job_id = next((s for s in reversed(segments) if _PATH_ID.fullmatch(s)), "")
-        if not job_id and segments and (match := _LEADING_ID.fullmatch(segments[-1])):
-            job_id = match[1]
-        if host == "jobs.dayforcehcm.com" and len(segments) > 1:
-            scope = f"{host}:{segments[1].casefold()}"  # /<locale>/<tenant>/...: ids are per tenant
-    if not job_id:
-        return set()
-    job_id = job_id.casefold()
-    keys = {f"{scope}:{job_id}"}
-    if job_id.isdigit() and len(job_id) >= 5 and (name := norm_company(company)):
-        keys.add(f"{name}#{job_id}")
-    return keys
+    elif "gh_jid" in params or host.endswith(".greenhouse.io"):
+        scope, job_id = "greenhouse", params.get("gh_jid") or _after(segments, "jobs")
+    elif host in ("jobs.lever.co", "jobs.ashbyhq.com", "ats.rippling.com"):
+        scope, job_id = host, next((s for s in segments if _UUID.fullmatch(s)), "")
+    elif host == "jobs.smartrecruiters.com" and len(segments) > 1 and (m := _LEADING_ID.fullmatch(segments[1])):
+        scope, job_id = host, m[1]
+    elif host.endswith(".icims.com"):
+        scope, job_id = host, _after(segments, "jobs")
+    elif host == "jobs.dayforcehcm.com" and len(segments) > 1:  # /<locale>/<tenant>/<site>/jobs/<id>
+        scope, job_id = f"dayforce:{segments[1].casefold()}", _after(segments, "jobs")
+    elif host.endswith(".adp.com") and params.get("cid"):
+        scope, job_id = f"adp:{params['cid']}", params.get("jobid", "")
+    elif host.endswith(".bamboohr.com"):
+        scope, job_id = host, _after(segments, "careers")
+    elif host.endswith(".oraclecloud.com"):  # One number per host, whatever the site: .../job/<id>, .../preview/<id>
+        scope, job_id = host, segments[-1] if segments[-1:] and segments[-1].isdigit() else ""
+    elif host.endswith(".workable.com") or host.endswith(".careerplug.com"):
+        scope, job_id = host, _after(segments, "j")
+    elif host.endswith(".jobvite.com"):
+        scope, job_id = "jobvite", params.get("j") or _after(segments, "job")
+    elif host.endswith(".breezy.hr") and (m := _LEADING_ID.fullmatch(_after(segments, "p"))):
+        scope, job_id = host, m[1]
+    elif host.endswith(".applytojob.com"):
+        scope, job_id = host, _after(segments, "apply")
+    elif ".ultipro." in host:
+        scope, job_id = host, params.get("opportunityid", "")
+    elif host.endswith(".csod.com"):
+        scope, job_id = host, _after(segments, "requisition")
+    elif host.endswith(".njoyn.com") and params.get("clid"):
+        scope, job_id = f"njoyn:{params['clid']}", params.get("jobid", "")
+    elif "job" in segments and len(segments) > 2 and segments[-1].isdigit() and segments[-2].isdigit():
+        scope, job_id = f"{host}:{segments[-2]}", segments[-1]  # Radancy: /job/<city>/<slug>/<tenant>/<id>
+    elif _YEARLESS_NUMBER.fullmatch(_after(segments, "job")):
+        scope, job_id = host, _after(segments, "job")  # Phenom: /<locale>/job/<id>[/<slug>]
+    elif len(segments) == 3 and segments[0] == "job" and segments[2].isdigit() and len(segments[2]) >= 6:
+        scope, job_id = host, segments[2]  # SuccessFactors career sites: /job/<slug>/<id>/
+    if not job_id or not re.fullmatch(r"[\w-]+", job_id):
+        return None
+    return f"{scope}|{job_id.casefold()}"
+
+
+def conflicts(keys: set[str], others: set[str]) -> bool:
+    """Whether two sets of requisitions name different jobs in the same ATS tenant."""
+    scopes = {key.rsplit("|", 1)[0]: key for key in keys}
+    return any(scopes.get(key.rsplit("|", 1)[0], key) != key for key in others)
